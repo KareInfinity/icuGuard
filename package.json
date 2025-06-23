@@ -11,7 +11,12 @@
   },
   "dependencies": {
     "react": "19.0.0",
-    "react-native": "0.79.2"
+    "react-native": "0.79.2",
+    "react-native-audio-record": "^0.2.2",
+    "react-native-fs": "^2.20.0",
+    "react-native-recording": "^0.5.1",
+    "react-native-safe-area-view": "^2.0.0",
+    "react-native-websocket": "^1.0.2"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
