@@ -85,6 +85,16 @@ android {
         versionCode 1
         versionName "1.0"
     }
+    
+    // Custom APK naming with date/time
+    applicationVariants.all { variant ->
+        variant.outputs.all { output ->
+            def date = new Date()
+            def formattedDate = date.format('yyyy-MM-dd_HH-mm')
+            def apkName = "icuGuard_${formattedDate}.apk"
+            outputFileName = apkName
+        }
+    }
     signingConfigs {
         debug {
             storeFile file('debug.keystore')

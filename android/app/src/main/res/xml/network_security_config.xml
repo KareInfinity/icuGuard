@@ -1,0 +1,18 @@
+<network-security-config>
+    <!-- Allow cleartext traffic for all domains in development -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+    
+    <!-- Specific domain configurations -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">vc2txt.quantosaas.com</domain>
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">192.168.1.13</domain> <!-- Local development server -->
+        <domain includeSubdomains="true">10.0.2.2</domain> <!-- Android emulator -->
+        <domain includeSubdomains="true">10.0.3.2</domain> <!-- Genymotion emulator -->
+    </domain-config>
+</network-security-config> 

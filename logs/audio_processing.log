@@ -1,0 +1,9 @@
+2025-07-17 19:38:47 - INFO - Loading Whisper model: medium.en
+2025-07-17 19:39:06 - INFO - Whisper model loaded successfully
+2025-07-17 19:39:07 - INFO - Starting Whisper Real-time Transcription API server
+2025-07-17 19:39:08 - INFO - Audio processing thread started
+2025-07-17 19:41:02 - INFO - Audio processing thread stopped
+2025-07-17 19:41:23 - INFO - Loading Whisper model: medium.en
+2025-07-17 19:41:33 - INFO - Whisper model loaded successfully
+2025-07-17 19:41:33 - INFO - Starting Whisper Real-time Transcription API server
+2025-07-17 19:41:33 - INFO - Audio processing thread started
