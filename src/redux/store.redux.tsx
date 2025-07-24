@@ -1,6 +1,7 @@
 import {combineReducers, configureStore} from '@reduxjs/toolkit';
 import {counteractions, counterreducers} from './counter.redux';
 import {transcriptionReducers} from './transcriptions.redux';
+import {serverReducers} from './server.redux';
 import {
   persistStore,
   persistReducer,
@@ -16,6 +17,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 const rootReducer = combineReducers({
   counter: counterreducers,
   transcriptions: transcriptionReducers,
+  server: serverReducers,
 });
 
 const persistedreducer = persistReducer(

@@ -16,9 +16,10 @@ import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { CompositeScreenProps } from '@react-navigation/native';
 import { useFocusEffect } from '@react-navigation/native';
 import { HomeModuleParamList, AppModuleParamList } from '../app.navigation';
-import {getAPIServer} from '../environment';
+import {getCustomPlatformAPIUrl} from '../utils/serverUtils';
 import { useSelector } from 'react-redux';
 import { selectTranscriptions } from '../redux/transcriptions.redux';
+import { selectCustomServerUrl } from '../redux/server.redux';
 
 type AccountContainerProps = CompositeScreenProps<
   BottomTabScreenProps<HomeModuleParamList, 'account'>,
@@ -37,12 +38,14 @@ type TranscriptionFile = {
 
 export function AccountContainer(props: AccountContainerProps) {
   const transcriptions = useSelector(selectTranscriptions);
+  const customServerUrl = useSelector(selectCustomServerUrl);
   const [files, setFiles] = useState<TranscriptionFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedFile, setSelectedFile] = useState<TranscriptionFile | null>(null);
   const [showFileContent, setShowFileContent] = useState(false);
   const [loadingFileContent, setLoadingFileContent] = useState(false);
   const [deletingFile, setDeletingFile] = useState<string | null>(null);
+  const [deletingAll, setDeletingAll] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filteredFiles, setFilteredFiles] = useState<TranscriptionFile[]>([]);
   
@@ -81,12 +84,12 @@ export function AccountContainer(props: AccountContainerProps) {
       };
       
       loadData();
-    }, [])
+    }, [customServerUrl]) // Add customServerUrl as dependency
   );
 
   const testServerConnection = async () => {
     try {
-      const healthUrl = getAPIServer() + '/health';
+      const healthUrl = getCustomPlatformAPIUrl(customServerUrl, '/health');
       console.log('Testing server connection to:', healthUrl);
       
       // Abort any existing request
@@ -128,6 +131,32 @@ export function AccountContainer(props: AccountContainerProps) {
     }
   };
 
+  const testAccountEndpoints = async () => {
+    try {
+      const testUrl = getCustomPlatformAPIUrl(customServerUrl, '/test-account-endpoints');
+      console.log('Testing account endpoints:', testUrl);
+      
+      const response = await fetch(testUrl, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+        },
+      });
+      
+      if (response.ok) {
+        const testData = await response.json();
+        console.log('Account endpoints test successful:', testData);
+        return testData;
+      } else {
+        console.warn('Account endpoints test failed:', response.status);
+        return null;
+      }
+    } catch (error) {
+      console.error('Account endpoints test failed:', error);
+      return null;
+    }
+  };
+
   useEffect(() => {
     // Filter files based on search query
     if (searchQuery.trim() === '') {
@@ -141,10 +170,30 @@ export function AccountContainer(props: AccountContainerProps) {
     }
   }, [files, searchQuery]);
 
+  // Handle server URL changes
+  useEffect(() => {
+    console.log('Server URL changed in account container:', customServerUrl);
+    
+    // Abort any ongoing requests
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    
+    // Clear files when server URL changes to avoid showing files from wrong server
+    setFiles([]);
+    setFilteredFiles([]);
+    setLoading(true);
+    
+    // Fetch files from new server
+    fetchTranscriptionFiles().catch(error => {
+      console.error('Failed to fetch transcription files after server URL change:', error);
+    });
+  }, [customServerUrl]);
+
   const fetchTranscriptionFiles = async () => {
     try {
       setLoading(true);
-      const apiUrl = getAPIServer() + '/transcription-files';
+      const apiUrl = getCustomPlatformAPIUrl(customServerUrl, '/transcription-files');
       console.log('Fetching transcription files from:', apiUrl);
       
       // Abort any existing request
@@ -203,7 +252,7 @@ export function AccountContainer(props: AccountContainerProps) {
       
       Alert.alert(
         "Connection Error", 
-        `Failed to fetch transcription files: ${errorMessage}\n\nPlease check:\n• Server is running on ${getAPIServer()}\n• Network connection\n• Server IP address`
+        `Failed to fetch transcription files: ${errorMessage}\n\nPlease check:\n• Server is running on ${getCustomPlatformAPIUrl(customServerUrl)}\n• Network connection\n• Server IP address`
       );
       setFiles([]); // Clear files on error
     } finally {
@@ -214,22 +263,32 @@ export function AccountContainer(props: AccountContainerProps) {
   };
 
   const refreshFiles = () => {
+    console.log('Manual refresh triggered for server:', customServerUrl);
     fetchTranscriptionFiles();
   };
 
   const viewFileContent = async (filename: string) => {
     try {
       setLoadingFileContent(true);
-      const apiUrl = getAPIServer() + `/transcription-file/${encodeURIComponent(filename)}`;
+      const apiUrl = getCustomPlatformAPIUrl(customServerUrl, `/transcription-file/${encodeURIComponent(filename)}`);
       console.log('Fetching file content from:', apiUrl);
       
-      const response = await fetch(apiUrl);
+      const response = await fetch(apiUrl, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+      });
       
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        const errorText = await response.text();
+        console.error('Server error response:', errorText);
+        throw new Error(`HTTP ${response.status}: ${response.statusText} - ${errorText}`);
       }
       
       const data = await response.json();
+      console.log('File content response:', data);
       
       if (data.success) {
         setSelectedFile(data);
@@ -246,7 +305,7 @@ export function AccountContainer(props: AccountContainerProps) {
     }
   };
 
-  const deleteFile = async (filename: string) => {
+    const deleteFile = async (filename: string) => {
     Alert.alert(
       "Delete File",
       `Are you sure you want to delete "${filename}"?`,
@@ -261,18 +320,55 @@ export function AccountContainer(props: AccountContainerProps) {
           onPress: async () => {
             try {
               setDeletingFile(filename);
-              const apiUrl = getAPIServer() + `/delete-transcription/${encodeURIComponent(filename)}`;
+              const apiUrl = getCustomPlatformAPIUrl(customServerUrl, `/delete-transcription/${encodeURIComponent(filename)}`);
               console.log('Deleting file from:', apiUrl);
               
-              const response = await fetch(apiUrl, {
-                method: 'DELETE',
-              });
+              // Create AbortController for timeout
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
               
-              if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+              let data;
+              try {
+                // Try DELETE method first
+                let response = await fetch(apiUrl, {
+                  method: 'DELETE',
+                  headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                  },
+                  signal: controller.signal,
+                });
+                
+                // If DELETE fails with 405, try POST method
+                if (response.status === 405) {
+                  console.log('DELETE method not supported, trying POST method');
+                  response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: {
+                      'Accept': 'application/json',
+                      'Content-Type': 'application/json',
+                    },
+                    signal: controller.signal,
+                  });
+                }
+                
+                clearTimeout(timeoutId);
+                
+                if (!response.ok) {
+                  const errorText = await response.text();
+                  console.error('Server error response:', errorText);
+                  throw new Error(`HTTP ${response.status}: ${response.statusText} - ${errorText}`);
+                }
+                
+                data = await response.json();
+                console.log('Delete response:', data);
+              } catch (error) {
+                clearTimeout(timeoutId);
+                if (error instanceof Error && error.name === 'AbortError') {
+                  throw new Error('Request timed out after 30 seconds');
+                }
+                throw error;
               }
-              
-              const data = await response.json();
               
               if (data.success) {
                 Alert.alert("Success", `File "${filename}" deleted successfully`);
@@ -287,6 +383,91 @@ export function AccountContainer(props: AccountContainerProps) {
               console.error('Error deleting file:', error);
             } finally {
               setDeletingFile(null);
+            }
+          }
+        }
+      ]
+    );
+  };
+
+  const deleteAllFiles = async () => {
+    Alert.alert(
+      "Delete All Files",
+      `Are you sure you want to delete ALL transcription files?\n\nThis action cannot be undone.`,
+      [
+        {
+          text: "Cancel",
+          style: "cancel"
+        },
+        {
+          text: "Delete All",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              setDeletingAll(true);
+              const apiUrl = getCustomPlatformAPIUrl(customServerUrl, '/delete-all-transcriptions');
+              console.log('Deleting all files from:', apiUrl);
+              
+              // Create AbortController for timeout
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout for bulk operation
+              
+              let data;
+              try {
+                // Try DELETE method first
+                let response = await fetch(apiUrl, {
+                  method: 'DELETE',
+                  headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                  },
+                  signal: controller.signal,
+                });
+                
+                // If DELETE fails with 405, try POST method
+                if (response.status === 405) {
+                  console.log('DELETE method not supported, trying POST method');
+                  response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: {
+                      'Accept': 'application/json',
+                      'Content-Type': 'application/json',
+                    },
+                    signal: controller.signal,
+                  });
+                }
+                
+                clearTimeout(timeoutId);
+                
+                if (!response.ok) {
+                  const errorText = await response.text();
+                  console.error('Server error response:', errorText);
+                  throw new Error(`HTTP ${response.status}: ${response.statusText} - ${errorText}`);
+                }
+                
+                data = await response.json();
+                console.log('Delete all response:', data);
+              } catch (error) {
+                clearTimeout(timeoutId);
+                if (error instanceof Error && error.name === 'AbortError') {
+                  throw new Error('Request timed out after 60 seconds');
+                }
+                throw error;
+              }
+              
+              if (data.success) {
+                Alert.alert("Success", `Successfully deleted ${data.deleted_count} files`);
+                // Refresh the file list
+                fetchTranscriptionFiles();
+              } else {
+                throw new Error(data.message || 'Failed to delete all files');
+              }
+            } catch (error) {
+              const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+              Alert.alert("Error", `Failed to delete all files: ${errorMessage}`);
+              console.error('Error deleting all files:', error);
+            } finally {
+              setDeletingAll(false);
             }
           }
         }
@@ -559,7 +740,16 @@ export function AccountContainer(props: AccountContainerProps) {
           fontWeight: 'bold',
           color: '#333',
         }}>Account</Text>
+        <Text style={{
+          fontSize: 12,
+          color: '#666',
+          marginTop: 4,
+        }}>
+          Server: {customServerUrl}
+        </Text>
       </View>
+
+
     
       {/* Transcription Files Section */}
       <View style={{
@@ -575,21 +765,69 @@ export function AccountContainer(props: AccountContainerProps) {
           fontWeight: 'bold',
           color: '#333',
         }}>Saved Files</Text>
-        <TouchableOpacity 
-          onPress={refreshFiles}
-          style={{
-            backgroundColor: '#007AFF',
-            paddingHorizontal: 12,
-            paddingVertical: 6,
-            borderRadius: 6,
-          }}
-        >
-          <Text style={{
-            color: 'white',
-            fontSize: 12,
-            fontWeight: '500',
-          }}>Refresh</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <TouchableOpacity 
+            onPress={async () => {
+              const testResult = await testAccountEndpoints();
+              if (testResult) {
+                Alert.alert('Server Test', `Server is working!\nFiles found: ${testResult.transcription_files_count}`);
+              } else {
+                Alert.alert('Server Test', 'Failed to connect to server');
+              }
+            }}
+            style={{
+              backgroundColor: '#28a745',
+              paddingHorizontal: 12,
+              paddingVertical: 6,
+              borderRadius: 6,
+            }}
+          >
+            <Text style={{
+              color: 'white',
+              fontSize: 12,
+              fontWeight: '500',
+            }}>Test</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            onPress={refreshFiles}
+            style={{
+              backgroundColor: '#007AFF',
+              paddingHorizontal: 12,
+              paddingVertical: 6,
+              borderRadius: 6,
+            }}
+          >
+            <Text style={{
+              color: 'white',
+              fontSize: 12,
+              fontWeight: '500',
+            }}>Refresh</Text>
+          </TouchableOpacity>
+          {files.length > 0 && (
+            <TouchableOpacity 
+              onPress={deleteAllFiles}
+              disabled={deletingAll}
+              style={{
+                backgroundColor: deletingAll ? '#ccc' : '#dc3545',
+                paddingHorizontal: 12,
+                paddingVertical: 6,
+                borderRadius: 6,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 4,
+              }}
+            >
+              {deletingAll ? (
+                <ActivityIndicator size="small" color="white" />
+              ) : null}
+              <Text style={{
+                color: 'white',
+                fontSize: 12,
+                fontWeight: '500',
+              }}>{deletingAll ? 'Deleting...' : 'Delete All'}</Text>
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
 
       {/* Search Section */}
@@ -633,6 +871,13 @@ export function AccountContainer(props: AccountContainerProps) {
           alignItems: 'center',
         }}>
           <ActivityIndicator size="large" color="#0000ff" />
+          <Text style={{
+            marginTop: 16,
+            fontSize: 14,
+            color: '#666',
+          }}>
+            Loading files from {customServerUrl}...
+          </Text>
         </View>
       ) : files.length === 0 ? (
         <View style={{

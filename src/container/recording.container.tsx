@@ -21,14 +21,11 @@ import {CompositeScreenProps} from '@react-navigation/native';
 import {HomeModuleParamList, AppModuleParamList} from '../app.navigation';
 import AudioRecord from 'react-native-audio-record';
 import RNFS from 'react-native-fs';
-import {getPlatformWSUrl} from '../environment';
-import {getAPIServer} from '../environment';
-import {SERVER_CONFIG} from '../environment';
+import {getCustomPlatformWSUrl, DEFAULT_SERVER_URL} from '../utils/serverUtils';
 import {useDispatch, useSelector} from 'react-redux';
 import {transcriptionActions, selectTranscriptions} from '../redux/transcriptions.redux';
+import {selectCustomServerUrl, serverActions} from '../redux/server.redux';
 import {RootState} from '../redux/store.redux';
-
-let chunkCounter = 0;
 
 type RecordingContainerProps = CompositeScreenProps<
   BottomTabScreenProps<HomeModuleParamList, 'home'>,
@@ -38,34 +35,236 @@ type RecordingContainerProps = CompositeScreenProps<
 export function RecordingContainer(props: RecordingContainerProps) {
   const dispatch = useDispatch();
   const transcriptions = useSelector(selectTranscriptions);
+  const customServerUrl = useSelector(selectCustomServerUrl);
   
   const [recording, setRecording] = useState(false);
   const [chunks, setChunks] = useState<string[]>([]);
-  const [ipAddress, setIpAddress] = useState(getPlatformWSUrl()); // Use environment config
-  const [customServerUrl, setCustomServerUrl] = useState(SERVER_CONFIG.BASE_ADDRESS); // Use environment config
+  const [ipAddress, setIpAddress] = useState(getCustomPlatformWSUrl(customServerUrl));
   const [showServerInput, setShowServerInput] = useState(false);
-  const [connectionStatus, setConnectionStatus] = useState('disconnected');
-  const [retryCount, setRetryCount] = useState(0);
-  const [maxRetries] = useState(3);
-  const [debugInfo, setDebugInfo] = useState({ chunksSent: 0, transcriptionsReceived: 0 });
+  const [serverUrlInput, setServerUrlInput] = useState(customServerUrl);
+  const [audioChunksSent, setAudioChunksSent] = useState(0);
   const [performanceLogs, setPerformanceLogs] = useState<string[]>([]);
+  const [audioRecordInitialized, setAudioRecordInitialized] = useState(false);
+  const [isSendingAudio, setIsSendingAudio] = useState(false);
+  const [lastError, setLastError] = useState<string | null>(null);
+  const [errorCount, setErrorCount] = useState(0);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [wsConnecting, setWsConnecting] = useState(false);
+
+  // Audio recording state
+  const fullAudioData = useRef<string>('');
+  const isRecording = useRef<boolean>(false);
+  const recordingStartTime = useRef<number | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const audioPreparationTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const logPerformance = (message: string) => {
     const timestamp = new Date().toISOString();
     const logEntry = `[${timestamp}] ${message}`;
     console.log(logEntry);
-    setPerformanceLogs(prev => [...prev.slice(-50), logEntry]); // Keep last 50 logs
+    setPerformanceLogs(prev => [...prev.slice(-50), logEntry]);
   };
 
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleError = (error: Error | string, context: string = 'Unknown') => {
+    const errorMessage = typeof error === 'string' ? error : error.message;
+    const fullError = `${context}: ${errorMessage}`;
+    
+    console.error(`❌ ${fullError}`);
+    setLastError(fullError);
+    setErrorCount(prev => prev + 1);
+    
+    logPerformance(`[ERROR] ${fullError}`);
+    
+    return fullError;
+  };
+
+  const clearError = () => {
+    setLastError(null);
+    setErrorCount(0);
+  };
+
+  const connectWebSocket = async (): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      try {
+        console.log('🔌 Connecting to WebSocket...');
+        setWsConnecting(true);
+        setWsConnected(false);
+        
+        const wsUrl = getCustomPlatformWSUrl(customServerUrl);
+        console.log('🌐 WebSocket URL:', wsUrl);
+        
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+        
+        ws.onopen = () => {
+          console.log('✅ WebSocket connected successfully');
+          setWsConnected(true);
+          setWsConnecting(false);
+          resolve();
+        };
+        
+        ws.onerror = (error) => {
+          console.error('❌ WebSocket connection error:', error);
+          setWsConnected(false);
+          setWsConnecting(false);
+          reject(new Error('WebSocket connection failed'));
+        };
+        
+        ws.onclose = (event) => {
+          console.log('🔌 WebSocket closed:', event.code, event.reason);
+          setWsConnected(false);
+          setWsConnecting(false);
+        };
+        
+        ws.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data);
+            console.log('📨 WebSocket message received:', message);
+            
+            if (message.type === 'transcription') {
+              // Handle real-time transcription updates
+              if (message.text) {
+                dispatch(transcriptionActions.addTranscription(message.text));
+              }
+            } else if (message.type === 'audio_received') {
+              console.log('✅ Server acknowledged audio chunk:', message.chunk);
+            } else if (message.type === 'session_complete') {
+              console.log('✅ Session completed on server side');
+            }
+          } catch (error) {
+            console.error('❌ Error parsing WebSocket message:', error);
+          }
+        };
+        
+        // Timeout after 10 seconds
+        setTimeout(() => {
+          if (ws.readyState === WebSocket.CONNECTING) {
+            ws.close();
+            setWsConnected(false);
+            setWsConnecting(false);
+            reject(new Error('WebSocket connection timeout'));
+          }
+        }, 10000);
+        
+      } catch (error) {
+        console.error('❌ WebSocket connection failed:', error);
+        setWsConnected(false);
+        setWsConnecting(false);
+        reject(error);
+      }
+    });
+  };
+
+  const disconnectWebSocket = () => {
+    if (wsRef.current) {
+      try {
+        wsRef.current.close();
+        wsRef.current = null;
+        setWsConnected(false);
+        setWsConnecting(false);
+        console.log('🔌 WebSocket disconnected');
+      } catch (error) {
+        console.warn('Error during WebSocket cleanup:', error);
+      }
+    }
+  };
+
+  const sendAudioViaWebSocket = async (): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      try {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+          throw new Error('WebSocket not connected');
+        }
+        
+        if (!fullAudioData.current || fullAudioData.current.length === 0) {
+          throw new Error('No audio data to send');
+        }
+        
+        console.log('📤 Sending full audio via WebSocket...');
+        console.log('📊 Audio size:', fullAudioData.current.length, 'characters');
+        
+        // Send audio data
+        const audioMessage = {
+          type: 'audio',
+          data: fullAudioData.current,
+          language: 'en'
+        };
+        
+        wsRef.current.send(JSON.stringify(audioMessage));
+        console.log('✅ Audio sent via WebSocket');
+        
+        // Send end message
+        const endMessage = {
+          type: 'end',
+          session_id: Date.now().toString()
+        };
+        
+        wsRef.current.send(JSON.stringify(endMessage));
+        console.log('✅ End message sent');
+        
+        // Wait a moment for server to process, then close connection
+        setTimeout(() => {
+          disconnectWebSocket();
+          resolve();
+        }, 2000);
+        
+      } catch (error) {
+        console.error('❌ Failed to send audio via WebSocket:', error);
+        disconnectWebSocket();
+        reject(error);
+      }
+    });
+  };
+
+  // Initialize audio recorder
+  useEffect(() => {
+    const initializeAudioRecord = async () => {
+      try {
+        console.log('🔧 Initializing AudioRecord...');
+        const options = {
+          sampleRate: 16000,
+          channels: 1,
+          bitsPerSample: 16,
+          wavFile: 'voice_recording.wav',
+        };
+        
+        let retryCount = 0;
+        const maxRetries = 3;
+        
+        while (retryCount < maxRetries) {
+          try {
+            await AudioRecord.init(options);
+            setAudioRecordInitialized(true);
+            console.log('✅ AudioRecord initialized successfully');
+            return;
+          } catch (initError) {
+            retryCount++;
+            console.warn(`❌ AudioRecord init attempt ${retryCount} failed:`, initError);
+            
+            if (retryCount >= maxRetries) {
+              throw initError;
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+          }
+        }
+      } catch (error) {
+        console.error('❌ Failed to initialize AudioRecord after all retries:', error);
+        setAudioRecordInitialized(false);
+        Alert.alert('Audio Error', 'Failed to initialize audio recorder after multiple attempts. Please restart the app.');
+      }
+    };
+
+    initializeAudioRecord();
+  }, []);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      cleanupWebSocket();
+      disconnectWebSocket();
+      if (audioPreparationTimeout.current) {
+        clearTimeout(audioPreparationTimeout.current);
+      }
     };
   }, []);
 
@@ -77,38 +276,17 @@ export function RecordingContainer(props: RecordingContainerProps) {
     }
   }, [transcriptions]);
 
-  const cleanupWebSocket = () => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
+  // Update WebSocket URL when custom server URL changes
+  useEffect(() => {
+    const wsUrl = getCustomPlatformWSUrl(customServerUrl);
+    setIpAddress(wsUrl);
+    console.log('🔧 WebSocket URL updated to:', wsUrl);
+  }, [customServerUrl]);
 
-    if (pingIntervalRef.current) {
-      clearInterval(pingIntervalRef.current);
-      pingIntervalRef.current = null;
-    }
-
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-
-    if (wsRef.current) {
-      try {
-        wsRef.current.onopen = null;
-        wsRef.current.onmessage = null;
-        wsRef.current.onerror = null;
-        wsRef.current.onclose = null;
-        
-        if (wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.close();
-        }
-        wsRef.current = null;
-      } catch (error) {
-        console.warn('Error during WebSocket cleanup:', error);
-      }
-    }
-  };
+  // Sync input field with Redux state
+  useEffect(() => {
+    setServerUrlInput(customServerUrl);
+  }, [customServerUrl]);
 
   const requestPermission = async () => {
     try {
@@ -128,199 +306,120 @@ export function RecordingContainer(props: RecordingContainerProps) {
     }
   };
 
-  const initRecorder = (filename: string) => {
-    const options = {
-      sampleRate: 16000,
-      channels: 1,
-      bitsPerSample: 16,
-      wavFile: filename,
-    };
-    AudioRecord.init(options);
-  };
-
-  const startChunkRecording = async () => {
+  const startVoiceRecording = async () => {
     try {
-      const filename = `chunk_${chunkCounter}.wav`;
-      console.log('🎙️ Starting chunk recording:', filename);
-      initRecorder(filename);
+      console.log('🎙️ Starting audio recording...');
+      
+      // Clear previous audio data
+      fullAudioData.current = '';
+      isRecording.current = true;
+      recordingStartTime.current = Date.now();
+
+      // Start recording
       await AudioRecord.start();
-      console.log('✅ Chunk recording started successfully');
+      console.log('✅ Audio recording started successfully');
+
     } catch (error) {
-      console.error('❌ Failed to start chunk recording:', error);
-      Alert.alert('Recording error', 'Failed to start recording: ' + (error as Error).message);
+      console.error('❌ Failed to start audio recording:', error);
+      Alert.alert('Recording error', 'Failed to start audio recording: ' + (error as Error).message);
     }
   };
 
-  const stopChunkRecording = async () => {
+  const stopVoiceRecording = async () => {
     try {
-      console.log('🛑 Stopping chunk recording...');
-      const file = await AudioRecord.stop();
-      console.log('📁 Audio file saved:', file);
-      setChunks(prev => [...prev, file]);
-      chunkCounter++;
-
-      console.log('📖 Reading audio file as base64...');
-      const base64Data = await RNFS.readFile(file, 'base64');
-      console.log('🎤 Audio chunk size:', base64Data.length, 'characters');
-
-      // Skip very small audio chunks (likely silence)
-      if (base64Data.length < 1000) {
-        console.log('⏭️ Skipping small audio chunk (likely silence)');
-        return file;
-      }
-
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        const audioMessage = {
-          type: 'audio',
-          data: base64Data,
-          chunk_id: chunkCounter,
-          client_timestamp: Date.now()
-        };
-        
-        logPerformance(`[CLIENT_SEND] Chunk:${chunkCounter} Size:${base64Data.length}chars`);
-        console.log('📤 Sending audio chunk to server...');
-        wsRef.current.send(JSON.stringify(audioMessage));
-        console.log('✅ Audio chunk sent successfully');
-        setDebugInfo(prev => ({ ...prev, chunksSent: prev.chunksSent + 1 }));
-      } else {
-        console.warn('⚠️ WebSocket not ready, cannot send audio chunk');
-        console.warn('WebSocket state:', wsRef.current?.readyState);
-      }
-      return file;
-    } catch (error) {
-      console.error('❌ Failed to stop chunk recording:', error);
-      Alert.alert('Recording error', 'Failed to stop recording or send chunk: ' + (error as Error).message);
-      throw error;
-    }
-  };
-
-  const createWebSocket = (wsUrl: string): Promise<WebSocket> => {
-    return new Promise((resolve, reject) => {
+      console.log('🛑 Stopping voice recording...');
+      
+      isRecording.current = false;
+      
+      // Stop recording and get the full audio data
       try {
-        const ws = new WebSocket(wsUrl);
+        const file = await AudioRecord.stop();
+        console.log('📁 Audio file path:', file);
         
-        // Set up event handlers with proper error handling
-        ws.onopen = () => {
-          console.log('✅ WebSocket connected to', wsUrl);
-          setConnectionStatus('connected');
-          setRetryCount(0); // Reset retry count on successful connection
-          resolve(ws);
-        };
-
-        ws.onmessage = (event) => {
-          try {
-            console.log('📨 Received WebSocket message:', event.data);
-            if (event && event.data) {
-              const message = JSON.parse(event.data);
-              console.log('📝 Parsed message:', message);
-              
-              if (message.type === 'transcription') {
-                const receiveTime = Date.now();
-                const serverTimestamp = message.timestamp || 0;
-                const roundTripTime = serverTimestamp > 0 ? receiveTime - serverTimestamp : 0;
-                
-                logPerformance(`[CLIENT_RECEIVE] Chunk:${message.chunk_id} Text:'${message.text}' RoundTrip:${roundTripTime}ms`);
-                console.log('✅ Adding transcription:', message.text);
-                console.log('📊 Chunk ID:', message.chunk_id);
-                console.log('⏱️ Round trip time:', roundTripTime, 'ms');
-                console.log('🔍 Current transcriptions count before:', transcriptions.length);
-                
-                // Add the transcription to Redux
-                dispatch(transcriptionActions.addTranscription(message.text));
-                setDebugInfo(prev => ({ ...prev, transcriptionsReceived: prev.transcriptionsReceived + 1 }));
-                
-                // Force a re-render by updating a state
-                setTimeout(() => {
-                  console.log('🔍 Current transcriptions count after:', transcriptions.length);
-                }, 100);
-                
-                // // Show an alert for debugging (remove this later)
-                // Alert.alert('Transcription Received', `Text: ${message.text}\nChunk: ${message.chunk_id}`);
-                
-              } else if (message.type === 'pong') {
-                console.log('🏓 Received pong from server, chunk ID:', message.chunk_id);
-              } else if (message.type === 'audio_received') {
-                console.log('📥 Server acknowledged audio chunk:', message.chunk);
-              } else if (message.type === 'session_complete') {
-                console.log('🏁 Session completed:', message);
-              } else {
-                console.log('⚠️ Unknown message type:', message.type);
-              }
-            }
-          } catch (e) {
-            console.warn('❌ Failed to parse WebSocket message:', e);
-            console.warn('Raw message data:', event.data);
-          }
-        };
-
-        ws.onerror = (event) => {
-          console.warn('WebSocket error event received:', event);
-          // Don't reject here, let onclose handle the failure
-        };
-
-        ws.onclose = (event) => {
-          console.log('WebSocket closed with code:', event.code, 'reason:', event.reason);
-          setConnectionStatus('disconnected');
+        // Read the audio file and validate it
+        const base64Data = await RNFS.readFile(file, 'base64');
+        
+        // Validate audio data
+        if (!base64Data || base64Data.length === 0) {
+          throw new Error('Audio file is empty or invalid');
+        }
+        
+        if (base64Data.length < 1000) {
+          console.warn('⚠️ Audio file seems very small, may be empty recording');
+        }
+        
+        // Store the full audio data
+        fullAudioData.current = base64Data;
+        
+        const recordingDuration = Date.now() - (recordingStartTime.current || 0);
+        console.log('📁 Full audio stored, size:', base64Data.length, 'characters');
+        console.log('⏱️ Recording duration:', recordingDuration, 'ms');
+        console.log('🔍 Audio data validation: OK');
+        
+        // Verify the audio data is properly stored
+        if (fullAudioData.current !== base64Data) {
+          throw new Error('Audio data not properly stored in variable');
+        }
+        
+        console.log('✅ Audio data verified and stored');
+        
+        // Wait for audio preparation (give time for file system operations)
+        console.log('⏳ Waiting for audio preparation...');
+        setIsSendingAudio(true);
+        
+        // Wait 1 second for audio preparation
+        await new Promise(resolve => {
+          audioPreparationTimeout.current = setTimeout(resolve, 1000);
+        });
+        
+        console.log('✅ Audio preparation complete, sending via WebSocket...');
+        
+        // Send audio via WebSocket only
+        try {
+          await sendAudioViaWebSocket();
+          console.log('✅ Audio sent successfully through WebSocket');
+          Alert.alert('✅ Success!', 'Audio sent to server successfully!\n\n🎤 Recording completed and processed.');
           
-          // Only reject if this is the initial connection attempt
-          if (ws.readyState === WebSocket.CONNECTING) {
-            reject(new Error(`WebSocket connection failed: ${event.code} - ${event.reason}`));
-          }
-        };
-
-        // Set a timeout for connection
-        const connectionTimeout = setTimeout(() => {
-          if (ws.readyState === WebSocket.CONNECTING) {
-            ws.close();
-            reject(new Error('WebSocket connection timeout'));
-          }
-        }, 10000); // 10 second timeout
-
-        // Clear timeout when connection succeeds
-        ws.onopen = () => {
-          clearTimeout(connectionTimeout);
-          console.log('✅ WebSocket connected to', wsUrl);
-          setConnectionStatus('connected');
-          setRetryCount(0);
-          resolve(ws);
-        };
-
+        } catch (wsError) {
+          console.error('❌ WebSocket failed:', wsError);
+          handleError(wsError as Error, 'WebSocket Audio Send Failed');
+          Alert.alert('❌ Send Failed', 'Failed to send audio via WebSocket. Please check your connection and try again.');
+        }
+        
       } catch (error) {
-        reject(error);
+        console.error('❌ Error getting audio data:', error);
+        handleError(error as Error, 'Audio Data Error');
+        Alert.alert('Recording Error', 'Failed to get audio data: ' + (error as Error).message);
+      } finally {
+        setIsSendingAudio(false);
       }
-    });
+      
+      console.log('✅ Audio recording stopped successfully');
+    } catch (error) {
+      console.error('❌ Failed to stop audio recording:', error);
+      handleError(error as Error, 'Recording Stop Error');
+      Alert.alert('Recording error', 'Failed to stop audio recording: ' + (error as Error).message);
+      setIsSendingAudio(false);
+    }
   };
 
-  const testDirectServerConnection = async () => {
+  const testWebSocketConnection = async () => {
     try {
-      console.log('🔍 DIRECT SERVER TEST STARTING...');
+      console.log('🔍 WEBSOCKET CONNECTION TEST STARTING...');
       
-      // Test 1: HTTP Health Check
-      console.log('📡 Test 1: HTTP Health Check');
-      const healthUrl = getAPIServer() + '/health';
-      console.log('   URL:', healthUrl);
-      
-      try {
-        const healthResponse = await fetch(healthUrl);
-        const healthData = await healthResponse.json();
-        console.log('   ✅ SUCCESS:', healthData);
-        Alert.alert('HTTP Test Success', `Server is running!\nStatus: ${healthData.status}\nModel: ${healthData.model_loaded ? 'Loaded' : 'Not loaded'}`);
-      } catch (error) {
-        console.log('   ❌ FAILED:', error);
-        Alert.alert('HTTP Test Failed', `Cannot reach server at ${healthUrl}\n\nError: ${error}`);
-        return;
-      }
-      
-      // Test 2: WebSocket Connection
-      console.log('📡 Test 2: WebSocket Connection');
-      const wsUrl = getPlatformWSUrl();
+      // Test WebSocket Connection
+      console.log('📡 Testing WebSocket Connection');
+      const wsUrl = getCustomPlatformWSUrl(customServerUrl);
       console.log('   URL:', wsUrl);
       
       try {
+        console.log('   🔌 Creating WebSocket object...');
         const ws = new WebSocket(wsUrl);
+        console.log('   🔌 WebSocket object created, readyState:', ws.readyState);
         
         ws.onopen = () => {
           console.log('   ✅ WebSocket CONNECTED!');
+          console.log('   🔌 Final readyState:', ws.readyState);
           Alert.alert('WebSocket Success', 'Direct WebSocket connection successful!\n\nServer is ready for audio transcription.');
           
           // Send a test message
@@ -343,287 +442,144 @@ export function RecordingContainer(props: RecordingContainerProps) {
         };
         
         ws.onerror = (error) => {
-          console.log('   ❌ WebSocket ERROR:', error);
+          console.error('   ❌ WebSocket ERROR:', error);
         };
         
         ws.onclose = (event) => {
-          console.log('   🔌 WebSocket CLOSED:', event.code, event.reason);
+          console.error('   🔌 WebSocket CLOSED:', event.code, event.reason);
         };
         
-        // Timeout after 10 seconds
+        // Timeout after 30 seconds
         setTimeout(() => {
           if (ws.readyState === WebSocket.CONNECTING) {
-            console.log('   ⏰ WebSocket TIMEOUT');
+            console.error('   ⏰ WebSocket TIMEOUT after 30 seconds');
             ws.close();
-            Alert.alert('WebSocket Timeout', 'WebSocket connection timed out after 10 seconds.\n\nCheck:\n1. Server is running\n2. Firewall allows port 8000\n3. Network connectivity');
+            Alert.alert('WebSocket Timeout', 'WebSocket connection timed out after 30 seconds.\n\nCheck:\n1. Server is running\n2. Firewall allows port 8000\n3. Network connectivity\n4. Server WebSocket endpoint is enabled');
           }
-        }, 10000);
+        }, 30000);
         
       } catch (error) {
-        console.log('   ❌ WebSocket FAILED:', error);
+        console.error('   ❌ WebSocket FAILED:', error);
         Alert.alert('WebSocket Failed', `WebSocket connection failed:\n${error}`);
       }
       
     } catch (error) {
-      console.error('❌ Direct test error:', error);
+      console.error('❌ WebSocket test error:', error);
       Alert.alert('Test Error', `Error: ${error}`);
     }
   };
 
-
-
   const updateServerUrl = () => {
-    if (customServerUrl.trim()) {
-      // Update the WebSocket URL - use WSS for HTTPS domains, WS for HTTP
-      const isSecure = customServerUrl.includes('https://') || customServerUrl.includes('quantosaas.com');
-      const protocol = isSecure ? 'wss' : 'ws';
-      const cleanUrl = customServerUrl.replace(/^https?:\/\//, ''); // Remove http/https prefix
-      const wsUrl = `${protocol}://${cleanUrl}/ws/transcribe`;
-      
-      setIpAddress(wsUrl);
+    if (serverUrlInput.trim()) {
+      dispatch(serverActions.setCustomServerUrl(serverUrlInput));
       setShowServerInput(false);
-      Alert.alert('Server Updated', `Server URL changed to: ${customServerUrl}\nWebSocket: ${wsUrl}`);
-      console.log('🔧 Server URL updated to:', wsUrl);
+      Alert.alert('Server Updated', `Server URL changed to: ${serverUrlInput}`);
+      console.log('🔧 Server URL updated to:', serverUrlInput);
     } else {
       Alert.alert('Invalid URL', 'Please enter a valid server URL');
     }
   };
 
-  const testServerConnection = async () => {
-    try {
-      // Use custom server URL if available, otherwise fall back to environment config
-      const isSecure = customServerUrl.includes('https://') || customServerUrl.includes('quantosaas.com');
-      const protocol = isSecure ? 'https' : 'http';
-      const cleanUrl = customServerUrl.replace(/^https?:\/\//, ''); // Remove http/https prefix
-      const baseUrl = customServerUrl ? `${protocol}://${cleanUrl}` : getAPIServer();
-      const healthUrl = baseUrl + '/health';
-      console.log('🔍 Testing server connection:', healthUrl);
-      
-      const response = await fetch(healthUrl);
-      const data = await response.json();
-      
-      console.log('✅ Server is running:', data);
-      return true;
-    } catch (error) {
-      console.error('❌ Server connection failed:', error);
-      Alert.alert('Server Error', `Cannot connect to server. Please make sure the server is running on ${customServerUrl || getAPIServer()}`);
-      return false;
-    }
-  };
+
 
   const startRecording = async () => {
-    const granted = await requestPermission();
-    if (!granted) return;
+    console.log('🎙️ START RECORDING PROCESS BEGINNING...');
+    console.log('📱 Platform:', Platform.OS);
+    console.log('🔧 Development mode:', __DEV__);
+    console.log('🌐 Custom server URL:', customServerUrl);
+    
+    // Check if AudioRecord is initialized
+    if (!audioRecordInitialized) {
+      Alert.alert('Audio Not Ready', 'Audio recorder is still initializing. Please wait a moment and try again.');
+      console.log('❌ AudioRecord not initialized yet');
+      return;
+    }
 
-    // Test server connection first
-    const serverOk = await testServerConnection();
-    if (!serverOk) return;
+    const granted = await requestPermission();
+    if (!granted) {
+      console.log('❌ Audio permission denied');
+      return;
+    }
 
     try {
-      setConnectionStatus('connecting');
+      console.log('🔌 Connecting to WebSocket before starting recording...');
       
-      // Use the platform-specific WebSocket URL
-      const wsUrl = ipAddress;
-
-      console.log('Connecting to:', wsUrl);
-      console.log('Platform:', Platform.OS);
-      console.log('Development mode:', __DEV__);
-
-      // Try to establish WebSocket connection with retry logic
-      let connected = false;
-      let lastError: Error | null = null;
-
-      for (let attempt = 0; attempt <= maxRetries && !connected; attempt++) {
-        if (attempt > 0) {
-          console.log(`Retry attempt ${attempt}/${maxRetries}`);
-          setRetryCount(attempt);
-          await new Promise(resolve => setTimeout(resolve, 1000 * attempt)); // Exponential backoff
-        }
-
-        try {
-          wsRef.current = await createWebSocket(wsUrl);
-          connected = true;
-        } catch (error) {
-          lastError = error as Error;
-          console.warn(`Connection attempt ${attempt + 1} failed:`, error);
-          
-          if (attempt === maxRetries) {
-            throw lastError;
-          }
-        }
-      }
-
-      if (!connected) {
-        throw lastError || new Error('Failed to establish WebSocket connection');
-      }
-
-      // Set up ping/pong for connection stability
-      pingIntervalRef.current = setInterval(() => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          try {
-            wsRef.current.send(JSON.stringify({type: 'ping'}));
-          } catch (error) {
-            console.warn('Failed to send ping:', error);
-          }
-        }
-      }, 30000);
-
+      // Connect to WebSocket first
+      await connectWebSocket();
+      console.log('✅ WebSocket connected successfully');
+      
       // Start recording
-      chunkCounter = 0;
+      console.log('🎙️ Starting audio recording...');
       setChunks([]);
-      setDebugInfo({ chunksSent: 0, transcriptionsReceived: 0 });
+      setAudioChunksSent(0);
       dispatch(transcriptionActions.clearTranscriptions());
       setRecording(true);
-      await startChunkRecording();
-
-      intervalRef.current = setInterval(async () => {
-        try {
-          await stopChunkRecording();
-          await startChunkRecording();
-        } catch {
-          // Already alerted inside stopChunkRecording
-          stopRecording(); // Stop recording if errors occur repeatedly
-        }
-      }, 3000);
+      await startVoiceRecording();
+      console.log('✅ Recording started successfully with WebSocket connection!');
 
     } catch (error) {
-      setConnectionStatus('error');
+      console.error('❌ START RECORDING PROCESS FAILED:', error);
+      
       const errorMessage = error instanceof Error ? error.message : 'Unknown connection error';
-      Alert.alert('Connection Error', `Failed to connect after ${retryCount + 1} attempts: ${errorMessage}`);
+      
+      let userMessage = 'Failed to connect to server';
+      
+      if (errorMessage.includes('timeout')) {
+        userMessage = 'Connection timeout. Please check your internet connection and try again.';
+      } else if (errorMessage.includes('Network request failed')) {
+        userMessage = 'Network error. Please check your internet connection.';
+      } else {
+        userMessage = `Connection error: ${errorMessage}`;
+      }
+      
+      Alert.alert('Connection Error', userMessage);
       console.error('Connection error:', error);
+      
+      // Clean up any partial connection
+      disconnectWebSocket();
     }
   };
 
   const stopRecording = async () => {
-    cleanupWebSocket();
     setRecording(false);
-    saveCurrentTranscriptions()
     try {
-      await stopChunkRecording();
+      await stopVoiceRecording();
     } catch {
-      // Already handled in stopChunkRecording
+      // Already handled in stopVoiceRecording
     }
-
-    // Save transcriptions to file before clearing
-    if (transcriptions.length > 0) {
-      try {
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const filename = `transcription_${timestamp}.txt`;
-        const content = transcriptions.join('\n');
-        
-        console.log('Saving transcriptions...');
-        console.log('Filename:', filename);
-        console.log('Content length:', content.length);
-        console.log('Save path:', RNFS.DocumentDirectoryPath);
-        
-        // Save to local device storage
-        const filePath = `${RNFS.DocumentDirectoryPath}/${filename}`;
-        await RNFS.writeFile(filePath, content, 'utf8');
-        
-        console.log('Transcription saved successfully:', filePath);
-        Alert.alert('Success', `Transcription saved as ${filename}\nLocation: ${filePath}`);
-        // Clear transcriptions after successful save
-        dispatch(transcriptionActions.clearTranscriptions());
-      } catch (error) {
-        console.error('Error saving transcription:', error);
-        Alert.alert('Error', 'Failed to save transcription: ' + (error as Error).message);
-      }
-    }
+    
+    console.log('✅ Recording stopped, audio sent via WebSocket');
   };
 
-  const testNetworkConnectivity = async () => {
-    try {
-      console.log('🌐 Testing network connectivity...');
-      
-      // Test different IP addresses using environment config
-      const testUrls = [
-        getAPIServer() + '/health',  // Primary server from environment
-        'http://127.0.0.1:8000/health',  // Localhost fallback
-        'http://10.0.2.2:8000/health',   // Android emulator fallback
-      ];
-      
-      for (const url of testUrls) {
-        try {
-          console.log(`🔍 Testing: ${url}`);
-          const response = await fetch(url);
-          const data = await response.json();
-          console.log(`✅ Success: ${url}`, data);
-          Alert.alert('Network Test Success', `Server found at: ${url}\nStatus: ${data.status}`);
-          return url.replace('/health', ''); // Return the base URL
-        } catch (error) {
-          console.log(`❌ Failed: ${url}`, error);
-        }
-      }
-      
-      Alert.alert('Network Test Failed', 'Could not reach server at any address.\n\nPlease check:\n1. Server is running\n2. Firewall settings\n3. Network connectivity');
-      
-    } catch (error) {
-      console.error('❌ Network test error:', error);
-      Alert.alert('Network Test Error', `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  };
 
-  const testAPIConnection = async () => {
-    try {
-      // First test the health endpoint
-      const healthUrl = getAPIServer() + '/health';
-      console.log('🔍 Testing health endpoint:', healthUrl);
-      
-      const healthResponse = await fetch(healthUrl);
-      const healthData = await healthResponse.json();
-      
-      console.log('✅ Health check successful:', healthData);
-      
-      // Then test the transcriptions endpoint
-      const transcriptionsUrl = getAPIServer() + '/list-transcriptions';
-      console.log('🔍 Testing transcriptions endpoint:', transcriptionsUrl);
-      
-      const transcriptionsResponse = await fetch(transcriptionsUrl);
-      const transcriptionsData = await transcriptionsResponse.json();
-      
-      console.log('✅ Transcriptions test successful:', transcriptionsData);
-      Alert.alert('API Test Success', 
-        `Server is healthy!\n` +
-        `Model loaded: ${healthData.model_loaded}\n` +
-        `Found ${transcriptionsData.files?.length || 0} transcription files.`
-      );
-    } catch (error) {
-      console.error('❌ API test failed:', error);
-      Alert.alert('API Test Failed', `Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  };
+
+
+
+
 
   const saveCurrentTranscriptions = async () => {
     if (transcriptions.length === 0) {
-      // Alert.alert('No Transcriptions', 'No transcriptions to save');
       return;
     }
-
-    // try {
-    //   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    //   const filename = `transcription_${timestamp}.txt`;
-    //   const content = transcriptions.join('\n');
-      
-    //   console.log('Saving transcriptions...');
-    //   console.log('Filename:', filename);
-    //   console.log('Content length:', content.length);
-    //   console.log('Save path:', RNFS.DocumentDirectoryPath);
-      
-    //   // Save to local device storage
-    //   const filePath = `${RNFS.DocumentDirectoryPath}/${filename}`;
-    //   await RNFS.writeFile(filePath, content, 'utf8');
-      
-    //   console.log('Transcription saved successfully:', filePath);
-    //   Alert.alert('Success', `Transcription saved as ${filename}\nLocation: ${filePath}`);
-    //   // Clear transcriptions after successful save
-    //   dispatch(transcriptionActions.clearTranscriptions());
-    // } catch (error) {
-    //   console.error('Error saving transcription:', error);
-    //   Alert.alert('Error', 'Failed to save transcription: ' + (error as Error).message);
-    // }
   };
 
- 
+
+
+  const verifyAudioData = () => {
+    console.log('🔍 Audio Data Verification:');
+    console.log('   - Audio data exists:', !!fullAudioData.current);
+    console.log('   - Audio data length:', fullAudioData.current?.length || 0);
+    console.log('   - Audio data type:', typeof fullAudioData.current);
+    
+    if (fullAudioData.current && fullAudioData.current.length > 0) {
+      console.log('✅ Audio data is valid and ready to send');
+      Alert.alert('Audio Data Status', `Audio data is ready!\nSize: ${fullAudioData.current.length} characters`);
+    } else {
+      console.log('❌ No audio data available');
+      Alert.alert('Audio Data Status', 'No audio data available. Please record audio first.');
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <KeyboardAvoidingView style={styles.keyboardAvoid} behavior="padding">
@@ -631,17 +587,24 @@ export function RecordingContainer(props: RecordingContainerProps) {
         <View style={styles.header}>
           <Text style={styles.headerTitle}>Audio Transcription</Text>
           <View style={styles.connectionStatus}>
-            <View style={[
-              styles.statusIndicator,
-              connectionStatus === 'connected' ? styles.connected : 
-              connectionStatus === 'connecting' ? styles.connecting : 
-              styles.disconnected
-            ]} />
-            <Text style={styles.statusText}>
-              {connectionStatus === 'connected' ? 'Connected' : 
-               connectionStatus === 'connecting' ? `Connecting${retryCount > 0 ? ` (${retryCount}/${maxRetries})` : ''}` : 
-               'Disconnected'}
-            </Text>
+            {!audioRecordInitialized && (
+              <View style={styles.audioStatus}>
+                <View style={[styles.statusIndicator, styles.connecting]} />
+                <Text style={styles.statusText}>Audio Initializing</Text>
+              </View>
+            )}
+            {wsConnecting && (
+              <View style={styles.audioStatus}>
+                <View style={[styles.statusIndicator, styles.connecting]} />
+                <Text style={styles.statusText}>Connecting...</Text>
+              </View>
+            )}
+            {wsConnected && (
+              <View style={styles.audioStatus}>
+                <View style={[styles.statusIndicator, styles.connected]} />
+                <Text style={styles.statusText}>Connected</Text>
+              </View>
+            )}
           </View>
         </View>
 
@@ -665,8 +628,8 @@ export function RecordingContainer(props: RecordingContainerProps) {
                 style={styles.serverInput}
                 placeholder="Enter server URL (e.g., vc2txt.quantosaas.com)"
                 placeholderTextColor="#999"
-                value={customServerUrl}
-                onChangeText={setCustomServerUrl}
+                value={serverUrlInput}
+                onChangeText={setServerUrlInput}
                 autoCapitalize="none"
                 autoCorrect={false}
               />
@@ -679,9 +642,8 @@ export function RecordingContainer(props: RecordingContainerProps) {
                 </TouchableOpacity>
                 <TouchableOpacity 
                   onPress={() => {
-                    setCustomServerUrl(SERVER_CONFIG.BASE_ADDRESS);
-                    setIpAddress(getPlatformWSUrl());
-                    Alert.alert('Server Reset', `Server URL reset to default: ${SERVER_CONFIG.BASE_ADDRESS}`);
+                    dispatch(serverActions.resetServerUrl());
+                    setServerUrlInput(DEFAULT_SERVER_URL);
                   }}
                   style={[styles.updateButton, { backgroundColor: '#6c757d' }]}
                 >
@@ -696,67 +658,80 @@ export function RecordingContainer(props: RecordingContainerProps) {
           </Text>
         </View>
 
-        {/* Stats Bar */}
-        {recording && (
-          <View style={styles.statsBar}>
-            <View style={styles.statItem}>
-              {/* <Icon name="file-upload" size={16} color="#555" /> */}
-              <Text style={styles.statText}>{debugInfo.chunksSent}</Text>
-            </View>
-            <View style={styles.statItem}>
-              {/* <Icon name="text-snippet" size={16} color="#555" /> */}
-              <Text style={styles.statText}>{debugInfo.transcriptionsReceived}</Text>
-            </View>
-            <View style={styles.statItem}>
-              {/* <Icon name="timer" size={16} color="#555" /> */}
-              <Text style={styles.statText}>{transcriptions.length}</Text>
+        {/* Error Display */}
+        {lastError && (
+          <View style={styles.errorBar}>
+            <View style={styles.errorContent}>
+              <Text style={styles.errorText}>⚠️ {lastError}</Text>
+              <TouchableOpacity onPress={clearError} style={styles.errorCloseButton}>
+                <Text style={styles.errorCloseText}>✕</Text>
+              </TouchableOpacity>
             </View>
           </View>
         )}
 
         {/* Main Action Buttons */}
         <View style={styles.buttonGroup}>
-
-          
           {!recording && (
             <TouchableOpacity 
-              style={styles.testButton}
-              onPress={testDirectServerConnection}
+              style={[styles.testButton]}
+              onPress={testWebSocketConnection}
             >
-              {/* <Icon name="wifi-tethering" size={20} color="#fff" /> */}
-              <Text style={styles.testButtonText}>TEST CONNECTION</Text>
+              <Text style={styles.testButtonText}>TEST WEBSOCKET</Text>
             </TouchableOpacity>
           )}
+
           <TouchableOpacity 
             style={[
               styles.mainButton,
-              recording ? styles.stopButton : styles.startButton
+              recording ? styles.stopButton : styles.startButton,
+              (!audioRecordInitialized || isSendingAudio) && styles.disabledButton
             ]}
             onPress={recording ? stopRecording : startRecording}
+            disabled={!audioRecordInitialized || isSendingAudio}
           >
-            {connectionStatus === 'connecting' ? (
-              <ActivityIndicator color="#fff" />
+            {!audioRecordInitialized ? (
+              <Text style={styles.buttonText}>INITIALIZING...</Text>
+            ) : isSendingAudio ? (
+              <>
+                <ActivityIndicator color="#fff" style={{marginRight: 10}} />
+                <Text style={styles.buttonText}>SENDING AUDIO...</Text>
+              </>
             ) : (
               <>
-                {/* <Icon 
-                  name={recording ? "stop" : "mic"} 
-                  size={24} 
-                  color="#fff" 
-                  style={styles.buttonIcon}
-                /> */}
                 <Text style={styles.buttonText}>
                   {recording ? 'STOP RECORDING' : 'START RECORDING'}
                 </Text>
               </>
             )}
           </TouchableOpacity>
-
         </View>
 
-       
-
         {/* Transcription List */}
-     
+        <View style={styles.transcriptionHeader}>
+          <Text style={styles.sectionTitle}>Transcriptions</Text>
+          {transcriptions.length > 0 && (
+            <TouchableOpacity onPress={saveCurrentTranscriptions} style={styles.saveButton}>
+              <Text style={styles.saveButtonText}>Save</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        <ScrollView style={styles.transcriptionList} contentContainerStyle={styles.transcriptionContent}>
+          {transcriptions.length > 0 ? (
+            transcriptions.map((transcription, index) => (
+              <View key={index} style={styles.transcriptionItem}>
+                <View style={styles.itemBullet} />
+                <Text style={styles.transcriptionText}>{transcription}</Text>
+              </View>
+            ))
+          ) : (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyText}>No transcriptions yet</Text>
+              <Text style={styles.emptySubtext}>Start recording to see transcriptions here</Text>
+            </View>
+          )}
+        </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -808,10 +783,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#6c757d',
   },
+  audioStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginLeft: 15,
+  },
   statsBar: {
     flexDirection: 'row',
     justifyContent: 'space-around',
-    padding: 12,
+    padding: 16,
     backgroundColor: '#fff',
     marginHorizontal: 20,
     marginTop: 10,
@@ -825,12 +805,19 @@ const styles = StyleSheet.create({
   statItem: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    flex: 1,
+  },
+  statLabel: {
+    fontSize: 14,
+    color: '#6c757d',
+    fontWeight: '500',
+    marginRight: 8,
   },
   statText: {
-    marginLeft: 6,
-    fontSize: 14,
+    fontSize: 16,
     color: '#495057',
-    fontWeight: '500',
+    fontWeight: '600',
   },
   buttonGroup: {
     padding: 20,
@@ -850,6 +837,10 @@ const styles = StyleSheet.create({
   stopButton: {
     backgroundColor: '#dc3545',
   },
+  disabledButton: {
+    backgroundColor: '#6c757d',
+    opacity: 0.6,
+  },
   buttonIcon: {
     marginRight: 10,
   },
@@ -867,11 +858,21 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     marginBottom: 15,
   },
+  testButtonGroup: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 10,
+    flexWrap: 'wrap',
+    gap: 8,
+  },
   testButtonText: {
     color: '#fff',
     fontSize: 14,
     fontWeight: '600',
-    marginLeft: 8,
+    textAlign: 'center',
+    justifyContent:'center'
+    
   },
   transcriptionHeader: {
     flexDirection: 'row',
@@ -898,6 +899,23 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     marginLeft: 5,
+  },
+  sendButton: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#28a745',
+    paddingVertical: 15,
+    paddingHorizontal: 20,
+    borderRadius: 10,
+    marginHorizontal: 20,
+    marginTop: 10,
+    marginBottom: 15,
+  },
+  sendButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
   transcriptionList: {
     flex: 1,
@@ -1008,5 +1026,47 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#6c757d',
     fontFamily: 'monospace',
+  },
+  errorBar: {
+    backgroundColor: '#f8d7da',
+    borderColor: '#f5c6cb',
+    borderWidth: 1,
+    borderRadius: 8,
+    marginHorizontal: 20,
+    marginTop: 10,
+    padding: 12,
+  },
+  errorContent: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  errorText: {
+    flex: 1,
+    fontSize: 14,
+    color: '#721c24',
+    fontWeight: '500',
+  },
+  errorCloseButton: {
+    backgroundColor: '#dc3545',
+    borderRadius: 12,
+    width: 24,
+    height: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 10,
+  },
+  errorCloseText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  speakingText: {
+    color: '#28a745',
+    fontWeight: '700',
+  },
+  silentText: {
+    color: '#6c757d',
+    fontWeight: '500',
   },
 });
