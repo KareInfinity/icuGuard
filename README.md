@@ -1,5 +1,29 @@
 This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
 
+# WhisperRN - Audio Transcription App
+
+A React Native application for real-time audio transcription with personalized user experience.
+
+## Features
+
+- 🎤 **Real-time Audio Recording**: Record and transcribe audio in real-time
+- 💾 **Transcription Management**: Save and manage your transcriptions
+- 🔧 **Server Configuration**: Customize server settings for your needs
+- 👤 **User Personalization**: Set your username for a personalized experience
+- 📱 **Cross-platform**: Works on both Android and iOS
+
+## User Experience
+
+### First-Time Setup
+When you first install the app, you'll be greeted with a welcome screen where you can:
+- Set your username for a personalized experience
+- Skip username setup and set it later
+- Learn about the app's features
+
+### Main Features
+- **Recording Tab**: Record audio and see real-time transcriptions
+- **Account Tab**: Manage your username and view saved transcriptions
+
 # Getting Started
 
 > **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
