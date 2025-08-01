@@ -17,9 +17,10 @@ import { CompositeScreenProps } from '@react-navigation/native';
 import { useFocusEffect } from '@react-navigation/native';
 import { HomeModuleParamList, AppModuleParamList } from '../app.navigation';
 import {getCustomPlatformAPIUrl} from '../utils/serverUtils';
-import { useSelector } from 'react-redux';
+import { useSelector, useDispatch } from 'react-redux';
 import { selectTranscriptions } from '../redux/transcriptions.redux';
 import { selectCustomServerUrl } from '../redux/server.redux';
+import { selectUsername, userActions } from '../redux/user.redux';
 
 type AccountContainerProps = CompositeScreenProps<
   BottomTabScreenProps<HomeModuleParamList, 'account'>,
@@ -37,8 +38,10 @@ type TranscriptionFile = {
 };
 
 export function AccountContainer(props: AccountContainerProps) {
+  const dispatch = useDispatch();
   const transcriptions = useSelector(selectTranscriptions);
   const customServerUrl = useSelector(selectCustomServerUrl);
+  const username = useSelector(selectUsername);
   const [files, setFiles] = useState<TranscriptionFile[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedFile, setSelectedFile] = useState<TranscriptionFile | null>(null);
@@ -48,6 +51,8 @@ export function AccountContainer(props: AccountContainerProps) {
   const [deletingAll, setDeletingAll] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filteredFiles, setFilteredFiles] = useState<TranscriptionFile[]>([]);
+  const [showUsernameInput, setShowUsernameInput] = useState(false);
+  const [newUsername, setNewUsername] = useState(username);
   
   // Refs to track and abort ongoing requests
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -62,6 +67,11 @@ export function AccountContainer(props: AccountContainerProps) {
       }
     };
   }, []);
+
+  // Update newUsername when username changes
+  useEffect(() => {
+    setNewUsername(username);
+  }, [username]);
 
   useFocusEffect(
     React.useCallback(() => {
@@ -475,6 +485,52 @@ export function AccountContainer(props: AccountContainerProps) {
     );
   };
 
+  const updateUsername = () => {
+    const trimmedUsername = newUsername.trim();
+    
+    if (!trimmedUsername) {
+      Alert.alert('Username Required', 'Please enter a username.');
+      return;
+    }
+    
+    if (trimmedUsername.length < 2) {
+      Alert.alert('Username Too Short', 'Username must be at least 2 characters long.');
+      return;
+    }
+    
+    if (trimmedUsername.length > 20) {
+      Alert.alert('Username Too Long', 'Username must be 20 characters or less.');
+      return;
+    }
+    
+    dispatch(userActions.setUsername(trimmedUsername));
+    setShowUsernameInput(false);
+    Alert.alert('Success', 'Username updated successfully!');
+  };
+
+  const resetUsername = () => {
+    Alert.alert(
+      'Reset Username',
+      'Are you sure you want to reset your username? This will clear your current username.',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+        {
+          text: 'Reset',
+          style: 'destructive',
+          onPress: () => {
+            dispatch(userActions.resetUser());
+            setNewUsername('');
+            setShowUsernameInput(false);
+            Alert.alert('Reset Complete', 'Username has been reset.');
+          },
+        },
+      ]
+    );
+  };
+
   const renderFileItem = ({ item }: { item: TranscriptionFile }) => (
     <TouchableOpacity 
       style={{
@@ -749,6 +805,130 @@ export function AccountContainer(props: AccountContainerProps) {
         </Text>
       </View>
 
+      {/* Username Section */}
+      <View style={{
+        padding: 16,
+        borderBottomWidth: 1,
+        borderBottomColor: '#ddd',
+        backgroundColor: '#fff',
+      }}>
+        <View style={{
+          flexDirection: 'row',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: 8,
+        }}>
+          <Text style={{
+            fontSize: 18,
+            fontWeight: 'bold',
+            color: '#333',
+          }}>Username</Text>
+          <TouchableOpacity 
+            onPress={() => setShowUsernameInput(!showUsernameInput)}
+            style={{
+              backgroundColor: '#007AFF',
+              paddingHorizontal: 12,
+              paddingVertical: 6,
+              borderRadius: 6,
+            }}
+          >
+            <Text style={{
+              color: 'white',
+              fontSize: 12,
+              fontWeight: '500',
+            }}>
+              {showUsernameInput ? 'Cancel' : 'Change'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+        
+        {showUsernameInput ? (
+          <View style={{ marginTop: 8 }}>
+            <TextInput
+              style={{
+                backgroundColor: '#f8f9fa',
+                borderWidth: 1,
+                borderColor: '#dee2e6',
+                borderRadius: 8,
+                padding: 12,
+                fontSize: 16,
+                color: '#333',
+                marginBottom: 8,
+              }}
+              placeholder="Enter new username"
+              placeholderTextColor="#999"
+              value={newUsername}
+              onChangeText={setNewUsername}
+              autoCapitalize="words"
+              autoCorrect={false}
+              maxLength={20}
+            />
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <TouchableOpacity 
+                onPress={updateUsername}
+                style={{
+                  backgroundColor: '#28a745',
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                  borderRadius: 6,
+                  flex: 1,
+                }}
+              >
+                <Text style={{
+                  color: 'white',
+                  fontSize: 12,
+                  fontWeight: '500',
+                  textAlign: 'center',
+                }}>Update</Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                onPress={resetUsername}
+                style={{
+                  backgroundColor: '#dc3545',
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                  borderRadius: 6,
+                  flex: 1,
+                }}
+              >
+                <Text style={{
+                  color: 'white',
+                  fontSize: 12,
+                  fontWeight: '500',
+                  textAlign: 'center',
+                }}>Reset</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        ) : (
+          <View style={{
+            flexDirection: 'row',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}>
+            <Text style={{
+              fontSize: 16,
+              color: username ? '#333' : '#999',
+              fontStyle: username ? 'normal' : 'italic',
+            }}>
+              {username || 'No username set'}
+            </Text>
+            {username && (
+              <Text style={{
+                fontSize: 12,
+                color: '#666',
+                backgroundColor: '#f0f0f0',
+                paddingHorizontal: 6,
+                paddingVertical: 2,
+                borderRadius: 4,
+              }}>
+                {username.length}/20 chars
+              </Text>
+            )}
+          </View>
+        )}
+      </View>
+
 
     
       {/* Transcription Files Section */}
@@ -846,7 +1026,7 @@ export function AccountContainer(props: AccountContainerProps) {
             fontSize: 16,
             color: '#333',
           }}
-          placeholder="Search files by name or content..."
+          placeholder="Search files by name"
           placeholderTextColor="#999"
           value={searchQuery}
           onChangeText={setSearchQuery}

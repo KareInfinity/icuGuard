@@ -9,12 +9,16 @@ import {
   NavigatorScreenParams,
 } from '@react-navigation/native';
 import {Platform, Text} from 'react-native';
+import {useSelector} from 'react-redux';
+import {selectHasCompletedSetup} from './redux/user.redux';
 
 import {RecordingContainer} from './container/recording.container';
 import {AccountContainer} from './container/account.container';
+import {UsernamePromptContainer} from './container/username-prompt.container';
 
 export type AppModuleParamList = {
   homemodule: NavigatorScreenParams<HomeModuleParamList>;
+  usernamePrompt: undefined;
 };
 
 const appmodule = createNativeStackNavigator<AppModuleParamList>();
@@ -28,6 +32,8 @@ const theme = {
 };
 
 export function AppNavigation() {
+  const hasCompletedSetup = useSelector(selectHasCompletedSetup);
+
   return (
     <NavigationContainer theme={theme}>
       <appmodule.Navigator
@@ -35,15 +41,25 @@ export function AppNavigation() {
           headerTitleStyle: {color: '#333', fontWeight: 'normal'},
           headerBackTitle: Platform.OS == 'ios' ? 'Back' : '',
         }}>
-        <appmodule.Screen
-          name="homemodule"
-          component={HomeModuleNavigation}
-          options={{
-            headerShown: false,
-            headerShadowVisible: false,
-            headerStyle: {backgroundColor: '#f5f5f5'},
-          }}
-        />
+        {!hasCompletedSetup ? (
+          <appmodule.Screen
+            name="usernamePrompt"
+            component={UsernamePromptScreen}
+            options={{
+              headerShown: false,
+            }}
+          />
+        ) : (
+          <appmodule.Screen
+            name="homemodule"
+            component={HomeModuleNavigation}
+            options={{
+              headerShown: false,
+              headerShadowVisible: false,
+              headerStyle: {backgroundColor: '#f5f5f5'},
+            }}
+          />
+        )}
       </appmodule.Navigator>
     </NavigationContainer>
   );
@@ -62,6 +78,17 @@ type HomeModuleNavigationProps = NativeStackScreenProps<
   AppModuleParamList,
   'homemodule'
 >;
+
+type UsernamePromptScreenProps = NativeStackScreenProps<AppModuleParamList, 'usernamePrompt'>;
+
+function UsernamePromptScreen({navigation}: UsernamePromptScreenProps) {
+  const handleComplete = () => {
+    // The navigation will automatically switch to the main app
+    // when hasCompletedSetup becomes true
+  };
+
+  return <UsernamePromptContainer onComplete={handleComplete} />;
+}
 
 export function HomeModuleNavigation(props: HomeModuleNavigationProps) {
   return (

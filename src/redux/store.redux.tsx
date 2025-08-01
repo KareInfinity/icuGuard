@@ -2,6 +2,7 @@ import {combineReducers, configureStore} from '@reduxjs/toolkit';
 import {counteractions, counterreducers} from './counter.redux';
 import {transcriptionReducers} from './transcriptions.redux';
 import {serverReducers} from './server.redux';
+import {userReducers} from './user.redux';
 import {
   persistStore,
   persistReducer,
@@ -18,6 +19,7 @@ const rootReducer = combineReducers({
   counter: counterreducers,
   transcriptions: transcriptionReducers,
   server: serverReducers,
+  user: userReducers,
 });
 
 const persistedreducer = persistReducer(

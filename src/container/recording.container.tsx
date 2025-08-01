@@ -25,6 +25,7 @@ import {getCustomPlatformWSUrl, DEFAULT_SERVER_URL} from '../utils/serverUtils';
 import {useDispatch, useSelector} from 'react-redux';
 import {transcriptionActions, selectTranscriptions} from '../redux/transcriptions.redux';
 import {selectCustomServerUrl, serverActions} from '../redux/server.redux';
+import {selectUsername} from '../redux/user.redux';
 import {RootState} from '../redux/store.redux';
 
 type RecordingContainerProps = CompositeScreenProps<
@@ -36,6 +37,7 @@ export function RecordingContainer(props: RecordingContainerProps) {
   const dispatch = useDispatch();
   const transcriptions = useSelector(selectTranscriptions);
   const customServerUrl = useSelector(selectCustomServerUrl);
+  const username = useSelector(selectUsername);
   
   const [recording, setRecording] = useState(false);
   const [chunks, setChunks] = useState<string[]>([]);
@@ -83,6 +85,25 @@ export function RecordingContainer(props: RecordingContainerProps) {
     setErrorCount(0);
   };
 
+  const sendStoredFullAudio = async () => {
+    if (!fullAudioData.current || fullAudioData.current.length === 0) {
+      Alert.alert('No Audio', 'No audio data available to send. Please record audio first.');
+      return;
+    }
+
+    console.log('📤 Manually sending stored full audio...');
+    console.log('📊 Stored audio size:', fullAudioData.current.length, 'characters');
+    
+    try {
+      await sendAudioViaWebSocket(fullAudioData.current);
+      Alert.alert('Success', 'Stored full audio sent successfully!');
+    } catch (error) {
+      console.error('❌ Failed to send stored audio:', error);
+      handleError(error as Error, 'Stored Audio Send Failed');
+      Alert.alert('Send Failed', 'Failed to send stored audio: ' + (error as Error).message);
+    }
+  };
+  
   const connectWebSocket = async (): Promise<void> => {
     return new Promise((resolve, reject) => {
       try {
@@ -98,6 +119,20 @@ export function RecordingContainer(props: RecordingContainerProps) {
         
         ws.onopen = () => {
           console.log('✅ WebSocket connected successfully');
+          
+          // Send initialization message with username
+          const initMessage = {
+            type: 'init',
+            username: username || 'unknown'
+          };
+          
+          try {
+            ws.send(JSON.stringify(initMessage));
+            console.log('📤 Sent initialization message with username:', username || 'unknown');
+          } catch (error) {
+            console.error('❌ Failed to send initialization message:', error);
+          }
+          
           setWsConnected(true);
           setWsConnecting(false);
           resolve();
@@ -130,6 +165,9 @@ export function RecordingContainer(props: RecordingContainerProps) {
               console.log('✅ Server acknowledged audio chunk:', message.chunk);
             } else if (message.type === 'session_complete') {
               console.log('✅ Session completed on server side');
+            } else if (message.type === 'initialized') {
+              console.log('✅ Server initialized session for user:', message.username);
+              console.log('📊 Session info - ID:', message.session_id, 'Count:', message.session_count);
             }
           } catch (error) {
             console.error('❌ Error parsing WebSocket message:', error);
@@ -420,7 +458,14 @@ export function RecordingContainer(props: RecordingContainerProps) {
         ws.onopen = () => {
           console.log('   ✅ WebSocket CONNECTED!');
           console.log('   🔌 Final readyState:', ws.readyState);
-          Alert.alert('WebSocket Success', 'Direct WebSocket connection successful!\n\nServer is ready for audio transcription.');
+          
+          // Send initialization message with username
+          const initMessage = {
+            type: 'init',
+            username: username || 'unknown'
+          };
+          ws.send(JSON.stringify(initMessage));
+          console.log('   📤 Sent initialization message with username:', username || 'unknown');
           
           // Send a test message
           const testMessage = {
@@ -429,6 +474,8 @@ export function RecordingContainer(props: RecordingContainerProps) {
           };
           ws.send(JSON.stringify(testMessage));
           console.log('   📤 Sent test ping message');
+          
+          Alert.alert('WebSocket Success', `Direct WebSocket connection successful!\n\nServer is ready for audio transcription.\nUsername: ${username || 'unknown'}`);
           
           // Close after 2 seconds
           setTimeout(() => {
@@ -439,6 +486,15 @@ export function RecordingContainer(props: RecordingContainerProps) {
         
         ws.onmessage = (event) => {
           console.log('   📨 Received:', event.data);
+          try {
+            const message = JSON.parse(event.data);
+            if (message.type === 'initialized') {
+              console.log('   ✅ Server initialized session for user:', message.username);
+              console.log('   📊 Session info - ID:', message.session_id, 'Count:', message.session_count);
+            }
+          } catch (error) {
+            console.log('   📨 Raw message (not JSON):', event.data);
+          }
         };
         
         ws.onerror = (error) => {
@@ -585,7 +641,14 @@ export function RecordingContainer(props: RecordingContainerProps) {
       <KeyboardAvoidingView style={styles.keyboardAvoid} behavior="padding">
         {/* Header Section */}
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>Audio Transcription</Text>
+          <View style={styles.headerContent}>
+            <Text style={styles.headerTitle}>
+              {username ? `Welcome, ${username}!` : 'Audio Transcription'}
+            </Text>
+            {username && (
+              <Text style={styles.headerSubtitle}>Ready to transcribe your audio, {username}</Text>
+            )}
+          </View>
           <View style={styles.connectionStatus}>
             {!audioRecordInitialized && (
               <View style={styles.audioStatus}>
@@ -707,31 +770,9 @@ export function RecordingContainer(props: RecordingContainerProps) {
           </TouchableOpacity>
         </View>
 
-        {/* Transcription List */}
-        <View style={styles.transcriptionHeader}>
-          <Text style={styles.sectionTitle}>Transcriptions</Text>
-          {transcriptions.length > 0 && (
-            <TouchableOpacity onPress={saveCurrentTranscriptions} style={styles.saveButton}>
-              <Text style={styles.saveButtonText}>Save</Text>
-            </TouchableOpacity>
-          )}
-        </View>
+      
 
-        <ScrollView style={styles.transcriptionList} contentContainerStyle={styles.transcriptionContent}>
-          {transcriptions.length > 0 ? (
-            transcriptions.map((transcription, index) => (
-              <View key={index} style={styles.transcriptionItem}>
-                <View style={styles.itemBullet} />
-                <Text style={styles.transcriptionText}>{transcription}</Text>
-              </View>
-            ))
-          ) : (
-            <View style={styles.emptyState}>
-              <Text style={styles.emptyText}>No transcriptions yet</Text>
-              <Text style={styles.emptySubtext}>Start recording to see transcriptions here</Text>
-            </View>
-          )}
-        </ScrollView>
+    
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -755,10 +796,18 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#e9ecef',
   },
+  headerContent: {
+    flex: 1,
+  },
   headerTitle: {
     fontSize: 22,
     fontWeight: '600',
     color: '#212529',
+  },
+  headerSubtitle: {
+    fontSize: 14,
+    color: '#6c757d',
+    marginTop: 2,
   },
   connectionStatus: {
     flexDirection: 'row',
