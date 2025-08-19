@@ -36,4 +36,4 @@ export const getCustomPlatformAPIUrl = (customServerUrl: string, endpoint: strin
 };
 
 // Default server configuration
-export const DEFAULT_SERVER_URL = 'vc2txt.quantosaas.com'; 
+export const DEFAULT_SERVER_URL = '192.168.1.22:8111'; 

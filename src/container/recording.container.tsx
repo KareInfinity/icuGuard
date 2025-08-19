@@ -12,7 +12,9 @@ import {
   Alert,
   StyleSheet,
   TouchableOpacity,
-  ActivityIndicator
+  ActivityIndicator,
+  Animated,
+  Image,
 } from 'react-native';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import {BottomTabScreenProps} from '@react-navigation/bottom-tabs';
@@ -23,13 +25,19 @@ import AudioRecord from 'react-native-audio-record';
 import RNFS from 'react-native-fs';
 import {getCustomPlatformWSUrl, DEFAULT_SERVER_URL} from '../utils/serverUtils';
 import {useDispatch, useSelector} from 'react-redux';
-import {transcriptionActions, selectTranscriptions} from '../redux/transcriptions.redux';
+import {
+  transcriptionActions,
+  selectTranscriptions,
+} from '../redux/transcriptions.redux';
 import {selectCustomServerUrl, serverActions} from '../redux/server.redux';
 import {selectUsername} from '../redux/user.redux';
 import {RootState} from '../redux/store.redux';
 
+// Import GIF assets
+const auxlinkBlueGif = require('../asserts/auxlink_blue.gif');
+const auxlinkRedGif = require('../asserts/auxlink_red.gif');
 type RecordingContainerProps = CompositeScreenProps<
-  BottomTabScreenProps<HomeModuleParamList, 'home'>,
+  BottomTabScreenProps<HomeModuleParamList, 'recording'>,
   NativeStackScreenProps<AppModuleParamList>
 >;
 
@@ -38,10 +46,12 @@ export function RecordingContainer(props: RecordingContainerProps) {
   const transcriptions = useSelector(selectTranscriptions);
   const customServerUrl = useSelector(selectCustomServerUrl);
   const username = useSelector(selectUsername);
-  
+
   const [recording, setRecording] = useState(false);
   const [chunks, setChunks] = useState<string[]>([]);
-  const [ipAddress, setIpAddress] = useState(getCustomPlatformWSUrl(customServerUrl));
+  const [ipAddress, setIpAddress] = useState(
+    getCustomPlatformWSUrl(customServerUrl),
+  );
   const [showServerInput, setShowServerInput] = useState(false);
   const [serverUrlInput, setServerUrlInput] = useState(customServerUrl);
   const [audioChunksSent, setAudioChunksSent] = useState(0);
@@ -58,7 +68,20 @@ export function RecordingContainer(props: RecordingContainerProps) {
   const isRecording = useRef<boolean>(false);
   const recordingStartTime = useRef<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const audioPreparationTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const audioPreparationTimeout = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+
+  // Animation values
+  const pulseAnimation = useRef(new Animated.Value(0)).current;
+  const recordAnimation = useRef(new Animated.Value(0)).current;
+  const waveformAnimations = useRef([
+    new Animated.Value(10),
+    new Animated.Value(10),
+    new Animated.Value(10),
+    new Animated.Value(10),
+    new Animated.Value(10),
+  ]).current;
 
   const logPerformance = (message: string) => {
     const timestamp = new Date().toISOString();
@@ -67,16 +90,129 @@ export function RecordingContainer(props: RecordingContainerProps) {
     setPerformanceLogs(prev => [...prev.slice(-50), logEntry]);
   };
 
+  // Start pulse animation
+  const startPulseAnimation = () => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnimation, {
+          toValue: 1,
+          duration: 1500,
+          useNativeDriver: false,
+        }),
+        Animated.timing(pulseAnimation, {
+          toValue: 0,
+          duration: 1500,
+          useNativeDriver: false,
+        }),
+      ]),
+    ).start();
+  };
+
+  // Start recording animation
+  const startRecordingAnimation = () => {
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(recordAnimation, {
+          toValue: 1,
+          duration: 1000,
+          useNativeDriver: false,
+        }),
+        Animated.timing(recordAnimation, {
+          toValue: 0,
+          duration: 1000,
+          useNativeDriver: false,
+        }),
+      ]),
+    ).start();
+  };
+
+  // Start waveform animation
+  const startWaveformAnimation = () => {
+    waveformAnimations.forEach((anim, index) => {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(anim, {
+            toValue: 20,
+            duration: 1000,
+            delay: index * 200,
+            useNativeDriver: false,
+          }),
+          Animated.timing(anim, {
+            toValue: 10,
+            duration: 1000,
+            useNativeDriver: false,
+          }),
+        ]),
+      ).start();
+    });
+  };
+
+  // Stop all animations
+  const stopAnimations = () => {
+    pulseAnimation.stopAnimation();
+    recordAnimation.stopAnimation();
+    waveformAnimations.forEach(anim => anim.stopAnimation());
+  };
+
+  // Get current animation styles
+  const getLogoStyle = () => {
+    if (recording) {
+      return {
+        transform: [
+          {
+            scale: recordAnimation.interpolate({
+              inputRange: [0, 1],
+              outputRange: [1, 1.1],
+            }),
+          },
+        ],
+        shadowOpacity: recordAnimation.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0.3, 0.8],
+        }),
+        shadowRadius: recordAnimation.interpolate({
+          inputRange: [0, 1],
+          outputRange: [10, 20],
+        }),
+      };
+    } else {
+      // Always show pulse effect when not recording
+      return {
+        transform: [
+          {
+            scale: pulseAnimation.interpolate({
+              inputRange: [0, 1],
+              outputRange: [1, 1.05],
+            }),
+          },
+        ],
+        shadowOpacity: pulseAnimation.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0.1, 0.4],
+        }),
+      };
+    }
+  };
+
+  const getWaveformStyle = (index: number) => {
+    return {
+      height: waveformAnimations[index].interpolate({
+        inputRange: [0, 1],
+        outputRange: [10, 20],
+      }),
+    };
+  };
+
   const handleError = (error: Error | string, context: string = 'Unknown') => {
     const errorMessage = typeof error === 'string' ? error : error.message;
     const fullError = `${context}: ${errorMessage}`;
-    
+
     console.error(`❌ ${fullError}`);
     setLastError(fullError);
     setErrorCount(prev => prev + 1);
-    
+
     logPerformance(`[ERROR] ${fullError}`);
-    
+
     return fullError;
   };
 
@@ -87,75 +223,88 @@ export function RecordingContainer(props: RecordingContainerProps) {
 
   const sendStoredFullAudio = async () => {
     if (!fullAudioData.current || fullAudioData.current.length === 0) {
-      Alert.alert('No Audio', 'No audio data available to send. Please record audio first.');
+      Alert.alert(
+        'No Audio',
+        'No audio data available to send. Please record audio first.',
+      );
       return;
     }
 
     console.log('📤 Manually sending stored full audio...');
-    console.log('📊 Stored audio size:', fullAudioData.current.length, 'characters');
-    
+    console.log(
+      '📊 Stored audio size:',
+      fullAudioData.current.length,
+      'characters',
+    );
+
     try {
-      await sendAudioViaWebSocket(fullAudioData.current);
+      await sendAudioViaWebSocket();
       Alert.alert('Success', 'Stored full audio sent successfully!');
     } catch (error) {
       console.error('❌ Failed to send stored audio:', error);
       handleError(error as Error, 'Stored Audio Send Failed');
-      Alert.alert('Send Failed', 'Failed to send stored audio: ' + (error as Error).message);
+      Alert.alert(
+        'Send Failed',
+        'Failed to send stored audio: ' + (error as Error).message,
+      );
     }
   };
-  
+
   const connectWebSocket = async (): Promise<void> => {
     return new Promise((resolve, reject) => {
       try {
         console.log('🔌 Connecting to WebSocket...');
         setWsConnecting(true);
         setWsConnected(false);
-        
+
         const wsUrl = getCustomPlatformWSUrl(customServerUrl);
         console.log('🌐 WebSocket URL:', wsUrl);
-        
+
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
-        
+
         ws.onopen = () => {
           console.log('✅ WebSocket connected successfully');
-          
+
           // Send initialization message with username
           const initMessage = {
             type: 'init',
-            username: username || 'unknown'
+            username: username || 'unknown',
           };
-          
+
           try {
             ws.send(JSON.stringify(initMessage));
-            console.log('📤 Sent initialization message with username:', username || 'unknown');
+            console.log(
+              '📤 Sent initialization message with username:',
+              username || 'unknown',
+            );
           } catch (error) {
             console.error('❌ Failed to send initialization message:', error);
           }
-          
+
           setWsConnected(true);
           setWsConnecting(false);
           resolve();
         };
-        
-        ws.onerror = (error) => {
+
+        ws.onerror = error => {
           console.error('❌ WebSocket connection error:', error);
           setWsConnected(false);
           setWsConnecting(false);
           reject(new Error('WebSocket connection failed'));
         };
-        
-        ws.onclose = (event) => {
+
+        ws.onclose = event => {
           console.log('🔌 WebSocket closed:', event.code, event.reason);
           setWsConnected(false);
           setWsConnecting(false);
         };
-        
-        ws.onmessage = (event) => {
+
+        ws.onmessage = event => {
           try {
             const message = JSON.parse(event.data);
             console.log('📨 WebSocket message received:', message);
-            
+
             if (message.type === 'transcription') {
               // Handle real-time transcription updates
               if (message.text) {
@@ -166,14 +315,22 @@ export function RecordingContainer(props: RecordingContainerProps) {
             } else if (message.type === 'session_complete') {
               console.log('✅ Session completed on server side');
             } else if (message.type === 'initialized') {
-              console.log('✅ Server initialized session for user:', message.username);
-              console.log('📊 Session info - ID:', message.session_id, 'Count:', message.session_count);
+              console.log(
+                '✅ Server initialized session for user:',
+                message.username,
+              );
+              console.log(
+                '📊 Session info - ID:',
+                message.session_id,
+                'Count:',
+                message.session_count,
+              );
             }
           } catch (error) {
             console.error('❌ Error parsing WebSocket message:', error);
           }
         };
-        
+
         // Timeout after 10 seconds
         setTimeout(() => {
           if (ws.readyState === WebSocket.CONNECTING) {
@@ -183,7 +340,6 @@ export function RecordingContainer(props: RecordingContainerProps) {
             reject(new Error('WebSocket connection timeout'));
           }
         }, 10000);
-        
       } catch (error) {
         console.error('❌ WebSocket connection failed:', error);
         setWsConnected(false);
@@ -213,39 +369,42 @@ export function RecordingContainer(props: RecordingContainerProps) {
         if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
           throw new Error('WebSocket not connected');
         }
-        
+
         if (!fullAudioData.current || fullAudioData.current.length === 0) {
           throw new Error('No audio data to send');
         }
-        
+
         console.log('📤 Sending full audio via WebSocket...');
-        console.log('📊 Audio size:', fullAudioData.current.length, 'characters');
-        
+        console.log(
+          '📊 Audio size:',
+          fullAudioData.current.length,
+          'characters',
+        );
+
         // Send audio data
         const audioMessage = {
           type: 'audio',
           data: fullAudioData.current,
-          language: 'en'
+          language: 'en',
         };
-        
+
         wsRef.current.send(JSON.stringify(audioMessage));
         console.log('✅ Audio sent via WebSocket');
-        
+
         // Send end message
         const endMessage = {
           type: 'end',
-          session_id: Date.now().toString()
+          session_id: Date.now().toString(),
         };
-        
+
         wsRef.current.send(JSON.stringify(endMessage));
         console.log('✅ End message sent');
-        
+
         // Wait a moment for server to process, then close connection
         setTimeout(() => {
           disconnectWebSocket();
           resolve();
         }, 2000);
-        
       } catch (error) {
         console.error('❌ Failed to send audio via WebSocket:', error);
         disconnectWebSocket();
@@ -253,6 +412,27 @@ export function RecordingContainer(props: RecordingContainerProps) {
       }
     });
   };
+
+  // Initialize animations
+  useEffect(() => {
+    startPulseAnimation();
+    return () => stopAnimations();
+  }, []);
+
+  // Update animations based on recording state
+  useEffect(() => {
+    if (recording) {
+      // Stop pulse and start recording animations
+      pulseAnimation.stopAnimation();
+      startRecordingAnimation();
+      startWaveformAnimation();
+    } else {
+      // Stop recording animations and restart pulse
+      recordAnimation.stopAnimation();
+      waveformAnimations.forEach(anim => anim.stopAnimation());
+      startPulseAnimation();
+    }
+  }, [recording]);
 
   // Initialize audio recorder
   useEffect(() => {
@@ -265,10 +445,10 @@ export function RecordingContainer(props: RecordingContainerProps) {
           bitsPerSample: 16,
           wavFile: 'voice_recording.wav',
         };
-        
+
         let retryCount = 0;
         const maxRetries = 3;
-        
+
         while (retryCount < maxRetries) {
           try {
             await AudioRecord.init(options);
@@ -277,19 +457,30 @@ export function RecordingContainer(props: RecordingContainerProps) {
             return;
           } catch (initError) {
             retryCount++;
-            console.warn(`❌ AudioRecord init attempt ${retryCount} failed:`, initError);
-            
+            console.warn(
+              `❌ AudioRecord init attempt ${retryCount} failed:`,
+              initError,
+            );
+
             if (retryCount >= maxRetries) {
               throw initError;
             }
-            
-            await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+
+            await new Promise(resolve =>
+              setTimeout(() => resolve(undefined), 1000 * retryCount),
+            );
           }
         }
       } catch (error) {
-        console.error('❌ Failed to initialize AudioRecord after all retries:', error);
+        console.error(
+          '❌ Failed to initialize AudioRecord after all retries:',
+          error,
+        );
         setAudioRecordInitialized(false);
-        Alert.alert('Audio Error', 'Failed to initialize audio recorder after multiple attempts. Please restart the app.');
+        Alert.alert(
+          'Audio Error',
+          'Failed to initialize audio recorder after multiple attempts. Please restart the app.',
+        );
       }
     };
 
@@ -308,9 +499,16 @@ export function RecordingContainer(props: RecordingContainerProps) {
 
   // Monitor transcriptions changes for debugging
   useEffect(() => {
-    console.log('🔄 Transcriptions state updated:', transcriptions.length, 'items');
+    console.log(
+      '🔄 Transcriptions state updated:',
+      transcriptions.length,
+      'items',
+    );
     if (transcriptions.length > 0) {
-      console.log('📝 Latest transcription:', transcriptions[transcriptions.length - 1]);
+      console.log(
+        '📝 Latest transcription:',
+        transcriptions[transcriptions.length - 1],
+      );
     }
   }, [transcriptions]);
 
@@ -333,7 +531,10 @@ export function RecordingContainer(props: RecordingContainerProps) {
           PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
         );
         if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
-          Alert.alert('Permission denied', 'Cannot record audio without permission');
+          Alert.alert(
+            'Permission denied',
+            'Cannot record audio without permission',
+          );
           return false;
         }
       }
@@ -347,7 +548,7 @@ export function RecordingContainer(props: RecordingContainerProps) {
   const startVoiceRecording = async () => {
     try {
       console.log('🎙️ Starting audio recording...');
-      
+
       // Clear previous audio data
       fullAudioData.current = '';
       isRecording.current = true;
@@ -356,87 +557,109 @@ export function RecordingContainer(props: RecordingContainerProps) {
       // Start recording
       await AudioRecord.start();
       console.log('✅ Audio recording started successfully');
-
     } catch (error) {
       console.error('❌ Failed to start audio recording:', error);
-      Alert.alert('Recording error', 'Failed to start audio recording: ' + (error as Error).message);
+      Alert.alert(
+        'Recording error',
+        'Failed to start audio recording: ' + (error as Error).message,
+      );
     }
   };
 
   const stopVoiceRecording = async () => {
     try {
       console.log('🛑 Stopping voice recording...');
-      
+
       isRecording.current = false;
-      
+
       // Stop recording and get the full audio data
       try {
         const file = await AudioRecord.stop();
         console.log('📁 Audio file path:', file);
-        
+
         // Read the audio file and validate it
         const base64Data = await RNFS.readFile(file, 'base64');
-        
+
         // Validate audio data
         if (!base64Data || base64Data.length === 0) {
           throw new Error('Audio file is empty or invalid');
         }
-        
+
         if (base64Data.length < 1000) {
-          console.warn('⚠️ Audio file seems very small, may be empty recording');
+          console.warn(
+            '⚠️ Audio file seems very small, may be empty recording',
+          );
         }
-        
+
         // Store the full audio data
         fullAudioData.current = base64Data;
-        
-        const recordingDuration = Date.now() - (recordingStartTime.current || 0);
-        console.log('📁 Full audio stored, size:', base64Data.length, 'characters');
+
+        const recordingDuration =
+          Date.now() - (recordingStartTime.current || 0);
+        console.log(
+          '📁 Full audio stored, size:',
+          base64Data.length,
+          'characters',
+        );
         console.log('⏱️ Recording duration:', recordingDuration, 'ms');
         console.log('🔍 Audio data validation: OK');
-        
+
         // Verify the audio data is properly stored
         if (fullAudioData.current !== base64Data) {
           throw new Error('Audio data not properly stored in variable');
         }
-        
+
         console.log('✅ Audio data verified and stored');
-        
+
         // Wait for audio preparation (give time for file system operations)
         console.log('⏳ Waiting for audio preparation...');
         setIsSendingAudio(true);
-        
+
         // Wait 1 second for audio preparation
         await new Promise(resolve => {
-          audioPreparationTimeout.current = setTimeout(resolve, 1000);
+          audioPreparationTimeout.current = setTimeout(
+            () => resolve(undefined),
+            1000,
+          );
         });
-        
+
         console.log('✅ Audio preparation complete, sending via WebSocket...');
-        
+
         // Send audio via WebSocket only
         try {
           await sendAudioViaWebSocket();
           console.log('✅ Audio sent successfully through WebSocket');
-          Alert.alert('✅ Success!', 'Audio sent to server successfully!\n\n🎤 Recording completed and processed.');
-          
+          Alert.alert(
+            '✅ Success!',
+            'Audio sent to server successfully!\n\n🎤 Recording completed and processed.',
+          );
         } catch (wsError) {
           console.error('❌ WebSocket failed:', wsError);
           handleError(wsError as Error, 'WebSocket Audio Send Failed');
-          Alert.alert('❌ Send Failed', 'Failed to send audio via WebSocket. Please check your connection and try again.');
+          Alert.alert(
+            '❌ Send Failed',
+            'Failed to send audio via WebSocket. Please check your connection and try again.',
+          );
         }
-        
       } catch (error) {
         console.error('❌ Error getting audio data:', error);
         handleError(error as Error, 'Audio Data Error');
-        Alert.alert('Recording Error', 'Failed to get audio data: ' + (error as Error).message);
+        Alert.alert(
+          'Recording Error',
+          'Failed to get audio data: ' + (error as Error).message,
+        );
       } finally {
         setIsSendingAudio(false);
       }
-      
+
       console.log('✅ Audio recording stopped successfully');
     } catch (error) {
       console.error('❌ Failed to stop audio recording:', error);
       handleError(error as Error, 'Recording Stop Error');
-      Alert.alert('Recording error', 'Failed to stop audio recording: ' + (error as Error).message);
+      Alert.alert(
+        'Recording error',
+        'Failed to stop audio recording: ' + (error as Error).message,
+      );
       setIsSendingAudio(false);
     }
   };
@@ -444,81 +667,104 @@ export function RecordingContainer(props: RecordingContainerProps) {
   const testWebSocketConnection = async () => {
     try {
       console.log('🔍 WEBSOCKET CONNECTION TEST STARTING...');
-      
+
       // Test WebSocket Connection
       console.log('📡 Testing WebSocket Connection');
       const wsUrl = getCustomPlatformWSUrl(customServerUrl);
       console.log('   URL:', wsUrl);
-      
+
       try {
         console.log('   🔌 Creating WebSocket object...');
         const ws = new WebSocket(wsUrl);
-        console.log('   🔌 WebSocket object created, readyState:', ws.readyState);
-        
+        console.log(
+          '   🔌 WebSocket object created, readyState:',
+          ws.readyState,
+        );
+
         ws.onopen = () => {
           console.log('   ✅ WebSocket CONNECTED!');
           console.log('   🔌 Final readyState:', ws.readyState);
-          
+
           // Send initialization message with username
           const initMessage = {
             type: 'init',
-            username: username || 'unknown'
+            username: username || 'unknown',
           };
           ws.send(JSON.stringify(initMessage));
-          console.log('   📤 Sent initialization message with username:', username || 'unknown');
-          
+          console.log(
+            '   📤 Sent initialization message with username:',
+            username || 'unknown',
+          );
+
           // Send a test message
           const testMessage = {
             type: 'ping',
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
           };
           ws.send(JSON.stringify(testMessage));
           console.log('   📤 Sent test ping message');
-          
-          Alert.alert('WebSocket Success', `Direct WebSocket connection successful!\n\nServer is ready for audio transcription.\nUsername: ${username || 'unknown'}`);
-          
+
+          Alert.alert(
+            'WebSocket Success',
+            `Direct WebSocket connection successful!\n\nServer is ready for audio transcription.\nUsername: ${
+              username || 'unknown'
+            }`,
+          );
+
           // Close after 2 seconds
           setTimeout(() => {
             ws.close();
             console.log('   🔌 Test WebSocket closed');
           }, 2000);
         };
-        
-        ws.onmessage = (event) => {
+
+        ws.onmessage = event => {
           console.log('   📨 Received:', event.data);
           try {
             const message = JSON.parse(event.data);
             if (message.type === 'initialized') {
-              console.log('   ✅ Server initialized session for user:', message.username);
-              console.log('   📊 Session info - ID:', message.session_id, 'Count:', message.session_count);
+              console.log(
+                '   ✅ Server initialized session for user:',
+                message.username,
+              );
+              console.log(
+                '   📊 Session info - ID:',
+                message.session_id,
+                'Count:',
+                message.session_count,
+              );
             }
           } catch (error) {
             console.log('   📨 Raw message (not JSON):', event.data);
           }
         };
-        
-        ws.onerror = (error) => {
+
+        ws.onerror = error => {
           console.error('   ❌ WebSocket ERROR:', error);
         };
-        
-        ws.onclose = (event) => {
+
+        ws.onclose = event => {
           console.error('   🔌 WebSocket CLOSED:', event.code, event.reason);
         };
-        
+
         // Timeout after 30 seconds
         setTimeout(() => {
           if (ws.readyState === WebSocket.CONNECTING) {
             console.error('   ⏰ WebSocket TIMEOUT after 30 seconds');
             ws.close();
-            Alert.alert('WebSocket Timeout', 'WebSocket connection timed out after 30 seconds.\n\nCheck:\n1. Server is running\n2. Firewall allows port 8000\n3. Network connectivity\n4. Server WebSocket endpoint is enabled');
+            Alert.alert(
+              'WebSocket Timeout',
+              'WebSocket connection timed out after 30 seconds.\n\nCheck:\n1. Server is running\n2. Firewall allows port 8000\n3. Network connectivity\n4. Server WebSocket endpoint is enabled',
+            );
           }
         }, 30000);
-        
       } catch (error) {
         console.error('   ❌ WebSocket FAILED:', error);
-        Alert.alert('WebSocket Failed', `WebSocket connection failed:\n${error}`);
+        Alert.alert(
+          'WebSocket Failed',
+          `WebSocket connection failed:\n${error}`,
+        );
       }
-      
     } catch (error) {
       console.error('❌ WebSocket test error:', error);
       Alert.alert('Test Error', `Error: ${error}`);
@@ -536,17 +782,18 @@ export function RecordingContainer(props: RecordingContainerProps) {
     }
   };
 
-
-
   const startRecording = async () => {
     console.log('🎙️ START RECORDING PROCESS BEGINNING...');
     console.log('📱 Platform:', Platform.OS);
     console.log('🔧 Development mode:', __DEV__);
     console.log('🌐 Custom server URL:', customServerUrl);
-    
+
     // Check if AudioRecord is initialized
     if (!audioRecordInitialized) {
-      Alert.alert('Audio Not Ready', 'Audio recorder is still initializing. Please wait a moment and try again.');
+      Alert.alert(
+        'Audio Not Ready',
+        'Audio recorder is still initializing. Please wait a moment and try again.',
+      );
       console.log('❌ AudioRecord not initialized yet');
       return;
     }
@@ -559,38 +806,42 @@ export function RecordingContainer(props: RecordingContainerProps) {
 
     try {
       console.log('🔌 Connecting to WebSocket before starting recording...');
-      
+
       // Connect to WebSocket first
       await connectWebSocket();
       console.log('✅ WebSocket connected successfully');
-      
+
       // Start recording
       console.log('🎙️ Starting audio recording...');
       setChunks([]);
       setAudioChunksSent(0);
       dispatch(transcriptionActions.clearTranscriptions());
       setRecording(true);
-      await startVoiceRecording();
-      console.log('✅ Recording started successfully with WebSocket connection!');
 
+      await startVoiceRecording();
+      console.log(
+        '✅ Recording started successfully with WebSocket connection!',
+      );
     } catch (error) {
       console.error('❌ START RECORDING PROCESS FAILED:', error);
-      
-      const errorMessage = error instanceof Error ? error.message : 'Unknown connection error';
-      
+
+      const errorMessage =
+        error instanceof Error ? error.message : 'Unknown connection error';
+
       let userMessage = 'Failed to connect to server';
-      
+
       if (errorMessage.includes('timeout')) {
-        userMessage = 'Connection timeout. Please check your internet connection and try again.';
+        userMessage =
+          'Connection timeout. Please check your internet connection and try again.';
       } else if (errorMessage.includes('Network request failed')) {
         userMessage = 'Network error. Please check your internet connection.';
       } else {
         userMessage = `Connection error: ${errorMessage}`;
       }
-      
+
       Alert.alert('Connection Error', userMessage);
       console.error('Connection error:', error);
-      
+
       // Clean up any partial connection
       disconnectWebSocket();
     }
@@ -598,20 +849,15 @@ export function RecordingContainer(props: RecordingContainerProps) {
 
   const stopRecording = async () => {
     setRecording(false);
+
     try {
       await stopVoiceRecording();
     } catch {
       // Already handled in stopVoiceRecording
     }
-    
+
     console.log('✅ Recording stopped, audio sent via WebSocket');
   };
-
-
-
-
-
-
 
   const saveCurrentTranscriptions = async () => {
     if (transcriptions.length === 0) {
@@ -619,76 +865,83 @@ export function RecordingContainer(props: RecordingContainerProps) {
     }
   };
 
-
-
   const verifyAudioData = () => {
     console.log('🔍 Audio Data Verification:');
     console.log('   - Audio data exists:', !!fullAudioData.current);
     console.log('   - Audio data length:', fullAudioData.current?.length || 0);
     console.log('   - Audio data type:', typeof fullAudioData.current);
-    
+
     if (fullAudioData.current && fullAudioData.current.length > 0) {
       console.log('✅ Audio data is valid and ready to send');
-      Alert.alert('Audio Data Status', `Audio data is ready!\nSize: ${fullAudioData.current.length} characters`);
+      Alert.alert(
+        'Audio Data Status',
+        `Audio data is ready!\nSize: ${fullAudioData.current.length} characters`,
+      );
     } else {
       console.log('❌ No audio data available');
-      Alert.alert('Audio Data Status', 'No audio data available. Please record audio first.');
+      Alert.alert(
+        'Audio Data Status',
+        'No audio data available. Please record audio first.',
+      );
     }
   };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView style={styles.keyboardAvoid} behavior="padding">
-        {/* Header Section */}
-        <View style={styles.header}>
-          <View style={styles.headerContent}>
-            <Text style={styles.headerTitle}>
-              {username ? `Welcome, ${username}!` : 'Audio Transcription'}
+    <SafeAreaView style={{flex: 1, backgroundColor: '#f9f9f9'}}>
+      <KeyboardAvoidingView
+        style={{margin: 10, justifyContent: 'center'}}
+        behavior="padding">
+        {/* Server Configuration */}
+        <View
+          style={{
+            backgroundColor: '#fff',
+            padding: 16,
+            borderRadius: 10,
+            marginHorizontal: 3,
+            marginBottom: 20,
+            shadowColor: '#000',
+            shadowOffset: {width: 0, height: 2},
+            shadowOpacity: 0.1,
+            shadowRadius: 4,
+            elevation: 2,
+          }}>
+          <View
+            style={{
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: 8,
+            }}>
+            <Text style={{fontSize: 16, fontWeight: '600', color: '#212529'}}>
+              Server Configuration
             </Text>
-            {username && (
-              <Text style={styles.headerSubtitle}>Ready to transcribe your audio, {username}</Text>
-            )}
-          </View>
-          <View style={styles.connectionStatus}>
-            {!audioRecordInitialized && (
-              <View style={styles.audioStatus}>
-                <View style={[styles.statusIndicator, styles.connecting]} />
-                <Text style={styles.statusText}>Audio Initializing</Text>
-              </View>
-            )}
-            {wsConnecting && (
-              <View style={styles.audioStatus}>
-                <View style={[styles.statusIndicator, styles.connecting]} />
-                <Text style={styles.statusText}>Connecting...</Text>
-              </View>
-            )}
-            {wsConnected && (
-              <View style={styles.audioStatus}>
-                <View style={[styles.statusIndicator, styles.connected]} />
-                <Text style={styles.statusText}>Connected</Text>
-              </View>
-            )}
-          </View>
-        </View>
-
-        {/* Server Configuration Section */}
-        <View style={styles.serverConfig}>
-          <View style={styles.serverConfigHeader}>
-            <Text style={styles.serverConfigTitle}>Server Configuration</Text>
-            <TouchableOpacity 
+            <TouchableOpacity
               onPress={() => setShowServerInput(!showServerInput)}
-              style={styles.serverToggleButton}
-            >
-              <Text style={styles.serverToggleText}>
+              style={{
+                backgroundColor: '#6c757d',
+                paddingHorizontal: 12,
+                paddingVertical: 6,
+                borderRadius: 6,
+              }}>
+              <Text style={{color: '#fff', fontSize: 12, fontWeight: '500'}}>
                 {showServerInput ? 'Hide' : 'Change'}
               </Text>
             </TouchableOpacity>
           </View>
-          
+
           {showServerInput && (
-            <View style={styles.serverInputContainer}>
+            <View style={{marginBottom: 8}}>
               <TextInput
-                style={styles.serverInput}
+                style={{
+                  backgroundColor: '#f8f9fa',
+                  borderWidth: 1,
+                  borderColor: '#dee2e6',
+                  borderRadius: 6,
+                  padding: 10,
+                  fontSize: 14,
+                  color: '#212529',
+                  marginBottom: 8,
+                }}
                 placeholder="Enter server URL (e.g., vc2txt.quantosaas.com)"
                 placeholderTextColor="#999"
                 value={serverUrlInput}
@@ -696,426 +949,276 @@ export function RecordingContainer(props: RecordingContainerProps) {
                 autoCapitalize="none"
                 autoCorrect={false}
               />
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                <TouchableOpacity 
+              <View style={{flexDirection: 'row', gap: 8}}>
+                <TouchableOpacity
                   onPress={updateServerUrl}
-                  style={styles.updateButton}
-                >
-                  <Text style={styles.updateButtonText}>Update</Text>
+                  style={{
+                    backgroundColor: '#007bff',
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                    borderRadius: 6,
+                    flex: 1,
+                    alignItems: 'center',
+                  }}>
+                  <Text
+                    style={{color: '#fff', fontSize: 12, fontWeight: '500'}}>
+                    Update
+                  </Text>
                 </TouchableOpacity>
-                <TouchableOpacity 
+                <TouchableOpacity
                   onPress={() => {
                     dispatch(serverActions.resetServerUrl());
                     setServerUrlInput(DEFAULT_SERVER_URL);
                   }}
-                  style={[styles.updateButton, { backgroundColor: '#6c757d' }]}
-                >
-                  <Text style={styles.updateButtonText}>Reset</Text>
+                  style={{
+                    backgroundColor: '#6c757d',
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                    borderRadius: 6,
+                    flex: 1,
+                    alignItems: 'center',
+                  }}>
+                  <Text
+                    style={{color: '#fff', fontSize: 12, fontWeight: '500'}}>
+                    Reset
+                  </Text>
                 </TouchableOpacity>
               </View>
             </View>
           )}
-          
-          <Text style={styles.currentServerText}>
+
+          <Text
+            style={{fontSize: 12, color: '#6c757d', fontFamily: 'monospace'}}>
             Current: {customServerUrl}
           </Text>
         </View>
 
+        {/* Test Button */}
+        <View style={{marginBottom: 20}}>
+          <TouchableOpacity
+            style={{
+              backgroundColor: '#6c757d',
+              paddingVertical: 12,
+              paddingHorizontal: 20,
+              borderRadius: 10,
+            }}
+            onPress={testWebSocketConnection}>
+            <Text
+              style={{
+                color: '#fff',
+                fontSize: 14,
+                fontWeight: '600',
+                textAlign: 'center',
+              }}>
+              Test WebSocket Connection
+            </Text>
+          </TouchableOpacity>
+          
+
+        </View>
+
         {/* Error Display */}
         {lastError && (
-          <View style={styles.errorBar}>
-            <View style={styles.errorContent}>
-              <Text style={styles.errorText}>⚠️ {lastError}</Text>
-              <TouchableOpacity onPress={clearError} style={styles.errorCloseButton}>
-                <Text style={styles.errorCloseText}>✕</Text>
+          <View
+            style={{
+              backgroundColor: '#f8d7da',
+              borderColor: '#f5c6cb',
+              borderWidth: 1,
+              borderRadius: 8,
+              marginHorizontal: 20,
+              marginBottom: 20,
+              padding: 12,
+            }}>
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+              }}>
+              <Text
+                style={{
+                  flex: 1,
+                  fontSize: 14,
+                  color: '#721c24',
+                  fontWeight: '500',
+                }}>
+                ⚠️ {lastError}
+              </Text>
+              <TouchableOpacity
+                onPress={clearError}
+                style={{
+                  backgroundColor: '#dc3545',
+                  borderRadius: 12,
+                  width: 24,
+                  height: 24,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  marginLeft: 10,
+                }}>
+                <Text style={{color: '#fff', fontSize: 12, fontWeight: 'bold'}}>
+                  ✕
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
         )}
 
-        {/* Main Action Buttons */}
-        <View style={styles.buttonGroup}>
-          {!recording && (
-            <TouchableOpacity 
-              style={[styles.testButton]}
-              onPress={testWebSocketConnection}
-            >
-              <Text style={styles.testButtonText}>TEST WEBSOCKET</Text>
-            </TouchableOpacity>
-          )}
+        {/* Username Display */}
+        {username && (
+          <View style={{alignItems: 'center', marginBottom: 20}}>
+            <Text style={{fontSize: 16, color: '#0066cc', fontWeight: '600'}}>
+              Welcome, {username}!
+            </Text>
+          </View>
+        )}
 
-          <TouchableOpacity 
-            style={[
-              styles.mainButton,
-              recording ? styles.stopButton : styles.startButton,
-              (!audioRecordInitialized || isSendingAudio) && styles.disabledButton
-            ]}
+        {/* Main Logo Button */}
+        <View
+          style={{
+            alignItems: 'center',
+            justifyContent: 'center',
+            marginBottom: 30,
+          }}>
+          <TouchableOpacity
+            style={{
+              width: 150,
+              height: 150,
+              borderRadius: 75,
+              backgroundColor: '#fff',
+              alignItems: 'center',
+              justifyContent: 'center',
+                             shadowColor: recording
+                 ? '#8B0000'  // Darker red
+                 : '#0b37e9ff',  // Darker blue
+               
+              shadowOffset: {width: 0, height: 0},
+              shadowOpacity: recording
+                ? 0.8
+                : !audioRecordInitialized
+                ? 0.7
+                : 0.5,
+              shadowRadius: recording ? 20 : !audioRecordInitialized ? 15 : 15,
+              elevation: recording ? 13 : !audioRecordInitialized ? 11 : 10,
+            }}
             onPress={recording ? stopRecording : startRecording}
             disabled={!audioRecordInitialized || isSendingAudio}
           >
-            {!audioRecordInitialized ? (
-              <Text style={styles.buttonText}>INITIALIZING...</Text>
-            ) : isSendingAudio ? (
-              <>
-                <ActivityIndicator color="#fff" style={{marginRight: 10}} />
-                <Text style={styles.buttonText}>SENDING AUDIO...</Text>
-              </>
-            ) : (
-              <>
-                <Text style={styles.buttonText}>
-                  {recording ? 'STOP RECORDING' : 'START RECORDING'}
-                </Text>
-              </>
-            )}
+            <Animated.View
+              style={[
+                {
+                  width: '100%',
+                  height: '100%',
+                  borderRadius: 75,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  backgroundColor: '#fff',
+                  overflow: 'hidden',
+                },
+                getLogoStyle(),
+              ]}>
+              {!audioRecordInitialized ? (
+                <Text style={{fontSize: 60}}>⏳</Text>
+              ) : (
+                <View style={{alignItems: 'center'}}>
+                  <Image
+                    source={require('../asserts/aixelink-logo.png')}
+                    style={{
+                      width: 40, // set fixed size instead of % for consistent rendering
+                      height: 40,
+                      borderRadius: 40, // half of width/height for circle
+                      marginBottom: 8, // space between image and text
+                    }}
+                    resizeMode="cover"
+                  />
+
+                  <Text
+                    style={{
+                      fontSize: 18,
+                      color: '#28308bff',
+                      textShadowColor: '#063160',
+                      // textShadowOffset: {width: 1, height: 1},
+                      textShadowRadius: 1,
+                      zIndex: 1,
+                    }}>
+                    Aixelink
+                  </Text>
+                </View>
+              )}
+            </Animated.View>
           </TouchableOpacity>
         </View>
 
-      
+
+
+        {/* Status Text */}
+        <View style={{alignItems: 'center', marginBottom: 20}}>
+          <Text
+            style={{
+              fontSize: 18,
+              color: '#555',
+              textAlign: 'center',
+              fontWeight: '500',
+            }}>
+            {!audioRecordInitialized
+              ? 'Initializing...'
+              : recording
+              ? 'Recording... Tap to stop.'
+              : isSendingAudio
+              ? 'Sending audio...'
+              : 'Tap to start recording'}
+          </Text>
+        </View>
 
     
+
+        {/* Connection Status */}
+        <View
+          style={{
+            flexDirection: 'row',
+            justifyContent: 'space-around',
+            width: '100%',
+            paddingHorizontal: 20,
+            marginBottom: 20,
+          }}>
+          <View style={{flexDirection: 'row', alignItems: 'center'}}>
+            <View
+              style={{
+                width: 12,
+                height: 12,
+                borderRadius: 6,
+                marginRight: 8,
+                backgroundColor: audioRecordInitialized ? '#28a745' : '#ffc107',
+              }}
+            />
+            <Text style={{fontSize: 12, color: '#666'}}>
+              Audio: {audioRecordInitialized ? 'Ready' : 'Initializing'}
+            </Text>
+          </View>
+          <View style={{flexDirection: 'row', alignItems: 'center'}}>
+            <View
+              style={{
+                width: 12,
+                height: 12,
+                borderRadius: 6,
+                marginRight: 8,
+                backgroundColor: wsConnected
+                  ? '#28a745'
+                  : wsConnecting
+                  ? '#ffc107'
+                  : '#dc3545',
+              }}
+            />
+            <Text style={{fontSize: 12, color: '#666'}}>
+              Server:{' '}
+              {wsConnected
+                ? 'Connected'
+                : wsConnecting
+                ? 'Connecting...'
+                : 'Disconnected'}
+            </Text>
+          </View>
+        </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f8f9fa',
-  },
-  keyboardAvoid: {
-    flex: 1,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 20,
-    paddingBottom: 10,
-    backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#e9ecef',
-  },
-  headerContent: {
-    flex: 1,
-  },
-  headerTitle: {
-    fontSize: 22,
-    fontWeight: '600',
-    color: '#212529',
-  },
-  headerSubtitle: {
-    fontSize: 14,
-    color: '#6c757d',
-    marginTop: 2,
-  },
-  connectionStatus: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  statusIndicator: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    marginRight: 8,
-  },
-  connected: {
-    backgroundColor: '#28a745',
-  },
-  connecting: {
-    backgroundColor: '#ffc107',
-  },
-  disconnected: {
-    backgroundColor: '#dc3545',
-  },
-  statusText: {
-    fontSize: 14,
-    color: '#6c757d',
-  },
-  audioStatus: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginLeft: 15,
-  },
-  statsBar: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    padding: 16,
-    backgroundColor: '#fff',
-    marginHorizontal: 20,
-    marginTop: 10,
-    borderRadius: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  statItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flex: 1,
-  },
-  statLabel: {
-    fontSize: 14,
-    color: '#6c757d',
-    fontWeight: '500',
-    marginRight: 8,
-  },
-  statText: {
-    fontSize: 16,
-    color: '#495057',
-    fontWeight: '600',
-  },
-  buttonGroup: {
-    padding: 20,
-    paddingTop: 10,
-  },
-  mainButton: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingVertical: 15,
-    borderRadius: 10,
-    marginBottom: 15,
-  },
-  startButton: {
-    backgroundColor: '#0d6efd',
-  },
-  stopButton: {
-    backgroundColor: '#dc3545',
-  },
-  disabledButton: {
-    backgroundColor: '#6c757d',
-    opacity: 0.6,
-  },
-  buttonIcon: {
-    marginRight: 10,
-  },
-  buttonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  testButton: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingVertical: 12,
-    backgroundColor: '#6c757d',
-    borderRadius: 10,
-    marginBottom: 15,
-  },
-  testButtonGroup: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 10,
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  testButtonText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-    textAlign: 'center',
-    justifyContent:'center'
-    
-  },
-  transcriptionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    marginBottom: 10,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#212529',
-  },
-  saveButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#198754',
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 6,
-  },
-  saveButtonText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
-    marginLeft: 5,
-  },
-  sendButton: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#28a745',
-    paddingVertical: 15,
-    paddingHorizontal: 20,
-    borderRadius: 10,
-    marginHorizontal: 20,
-    marginTop: 10,
-    marginBottom: 15,
-  },
-  sendButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  transcriptionList: {
-    flex: 1,
-    paddingHorizontal: 15,
-  },
-  transcriptionContent: {
-    paddingBottom: 20,
-  },
-  transcriptionItem: {
-    flexDirection: 'row',
-    backgroundColor: '#fff',
-    padding: 15,
-    borderRadius: 8,
-    marginBottom: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 1,
-  },
-  itemBullet: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#0d6efd',
-    marginTop: 6,
-    marginRight: 10,
-  },
-  transcriptionText: {
-    flex: 1,
-    fontSize: 14,
-    lineHeight: 20,
-    color: '#212529',
-  },
-  emptyState: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 40,
-  },
-  emptyText: {
-    fontSize: 16,
-    color: '#6c757d',
-    marginTop: 15,
-    marginBottom: 5,
-  },
-  emptySubtext: {
-    fontSize: 14,
-    color: '#adb5bd',
-    textAlign: 'center',
-  },
-  serverConfig: {
-    backgroundColor: '#fff',
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e9ecef',
-  },
-  serverConfigHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  serverConfigTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#212529',
-  },
-  serverToggleButton: {
-    backgroundColor: '#6c757d',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
-  },
-  serverToggleText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  serverInputContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-    gap: 8,
-  },
-  serverInput: {
-    flex: 1,
-    backgroundColor: '#f8f9fa',
-    borderWidth: 1,
-    borderColor: '#dee2e6',
-    borderRadius: 6,
-    padding: 10,
-    fontSize: 14,
-    color: '#212529',
-  },
-  updateButton: {
-    backgroundColor: '#007bff',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 6,
-  },
-  updateButtonText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  currentServerText: {
-    fontSize: 12,
-    color: '#6c757d',
-    fontFamily: 'monospace',
-  },
-  errorBar: {
-    backgroundColor: '#f8d7da',
-    borderColor: '#f5c6cb',
-    borderWidth: 1,
-    borderRadius: 8,
-    marginHorizontal: 20,
-    marginTop: 10,
-    padding: 12,
-  },
-  errorContent: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  errorText: {
-    flex: 1,
-    fontSize: 14,
-    color: '#721c24',
-    fontWeight: '500',
-  },
-  errorCloseButton: {
-    backgroundColor: '#dc3545',
-    borderRadius: 12,
-    width: 24,
-    height: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginLeft: 10,
-  },
-  errorCloseText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
-  speakingText: {
-    color: '#28a745',
-    fontWeight: '700',
-  },
-  silentText: {
-    color: '#6c757d',
-    fontWeight: '500',
-  },
-});

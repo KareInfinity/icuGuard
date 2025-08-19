@@ -67,6 +67,7 @@ export function AppNavigation() {
 
 export type HomeModuleParamList = {
   home: undefined;
+  recording: undefined;
   account: {
     text: string;
   };
@@ -98,7 +99,7 @@ export function HomeModuleNavigation(props: HomeModuleNavigationProps) {
         tabBarShowLabel: false,
       }}>
       <homemodule.Screen
-        name="home"
+        name="recording"
         component={RecordingContainer}
         options={{
           headerShown: false,

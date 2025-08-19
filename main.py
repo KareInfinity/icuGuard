@@ -1,5 +1,7 @@
 import os
 import re
+from typing import Optional
+from fastapi.responses import JSONResponse
 import psutil
 # Force CPU-only mode for faster-whisper
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -423,6 +425,9 @@ async def health_check():
         test_file = os.path.join(transcriptions_dir, "health_test.txt")
         with open(test_file, 'w') as f:
             f.write("health test")
+            f.flush()             # Force flush buffers
+            os.fsync(f.fileno())  # Force flush to disk at OS level
+        # File is now fully flushed and closed
         
         # Test read permission
         with open(test_file, 'r') as f:
@@ -729,6 +734,9 @@ def save_transcription_to_file(original_filename: str, result: dict):
         if transcription_text:
             with open(transcription_filepath, 'w', encoding='utf-8') as f:
                 f.write(transcription_text)
+                f.flush()             # Force flush buffers
+                os.fsync(f.fileno())  # Force flush to disk at OS level
+            # File is now fully flushed and closed
             logger.info(f"Transcription saved to: {transcription_filepath}")
         else:
             logger.info(f"No transcription text to save for {original_filename}")
@@ -1243,6 +1251,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 try:
                     with open(chunk_filepath, 'wb') as audio_file:
                         audio_file.write(audio_bytes)
+                        audio_file.flush()             # Force flush buffers
+                        os.fsync(audio_file.fileno())  # Force flush to disk at OS level
+                    # File is now fully flushed and closed
                     
                     logger.info(f"[SESSION {session_id}] AUDIO CHUNK {chunk_counter} SAVED - File: {chunk_filename}")
                     logger.info(f"[SESSION {session_id}] AUDIO CHUNK {chunk_counter} SAVED - Path: {chunk_filepath}")
@@ -1388,6 +1399,25 @@ class AudioProcessor:
                 logger.warning(f"[PROCESSOR] Queue full ({self.max_queue_size}), dropping chunk {chunk_number} for session {session_id}")
                 return
         
+        # Get username from session info
+        username = "unknown"
+        session_count = 1
+        with self.session_lock:
+            if session_id in self.sessions:
+                session_username = self.sessions[session_id].get('username')
+                session_count = self.sessions[session_id].get('session_count', 1)
+                if session_username and session_username != "unknown":
+                    username = session_username
+                else:
+                    # Try to extract username from session directory path as fallback
+                    session_dir = self.sessions[session_id].get('dir', '')
+                    if session_dir and '/audio/' in session_dir:
+                        path_parts = session_dir.split('/')
+                        if len(path_parts) >= 3 and path_parts[0] == 'audio':
+                            potential_username = path_parts[1]
+                            if potential_username and potential_username != 'session_' + session_id:
+                                username = potential_username
+        
         # Verify file exists before adding to queue (with retry)
         max_retries = 5
         for attempt in range(max_retries):
@@ -1411,6 +1441,8 @@ class AudioProcessor:
         with self.queue_lock:
             self.processing_queue.append({
                 'session_id': session_id,
+                'username': username,
+                'session_count': session_count,
                 'filepath': chunk_filepath,
                 'chunk_number': chunk_number,
                 'timestamp': datetime.now()
@@ -1421,7 +1453,7 @@ class AudioProcessor:
                 if session_id in self.sessions:
                     self.sessions[session_id]['total_chunks'] = max(self.sessions[session_id]['total_chunks'], chunk_number)
             
-            logger.info(f"[PROCESSOR] Added chunk {chunk_number} to queue for session {session_id} - Queue size: {len(self.processing_queue)}")
+            logger.info(f"[PROCESSOR] Added chunk {chunk_number} to queue for session {session_id} (user: {username}) - Queue size: {len(self.processing_queue)}")
     
     def mark_session_complete(self, session_id: str):
         """Mark a session as complete"""
@@ -1475,6 +1507,8 @@ class AudioProcessor:
         # Use semaphore to limit concurrent processing
         with self.processing_semaphore:
             session_id = chunk_info['session_id']
+            username = chunk_info.get('username', 'unknown')
+            session_count = chunk_info.get('session_count', 1)
             filepath = chunk_info['filepath']
             chunk_number = chunk_info['chunk_number']
         
@@ -1543,7 +1577,7 @@ class AudioProcessor:
                 }
                 
                 # Save transcription to file
-                self._save_transcription_output(session_id, chunk_number, output_data)
+                self._save_transcription_output(session_id, chunk_number, output_data, username, session_count)
                 
                 # Send message directly to websocket
                 self._send_websocket_message_immediate(session_id, chunk_number, transcription_text, result)
@@ -1585,7 +1619,7 @@ class AudioProcessor:
     
 
     
-    def _save_transcription_output(self, session_id, chunk_number, output_data):
+    def _save_transcription_output(self, session_id, chunk_number, output_data, username=None, session_count=None):
         """Save transcription output to audio_files folder"""
         try:
             # Create audio_files directory if it doesn't exist
@@ -1598,34 +1632,36 @@ class AudioProcessor:
             
             with open(json_filepath, 'w', encoding='utf-8') as json_file:
                 json.dump(output_data, json_file, indent=2, ensure_ascii=False)
+                json_file.flush()             # Force flush buffers
+                os.fsync(json_file.fileno())  # Force flush to disk at OS level
+            # File is now fully flushed and closed
             
             # Save/append to single session transcription file in transcriptions folder
             transcriptions_dir = "transcriptions"
             os.makedirs(transcriptions_dir, exist_ok=True)
             
-            # Get username and session count from session info
-            username = "unknown"
-            session_count = 1
-            with self.session_lock:
-                if session_id in self.sessions:
-                    session_username = self.sessions[session_id].get('username')
-                    session_count = self.sessions[session_id].get('session_count', 1)
-                    # Only use the username if it's not None or empty
-                    if session_username and session_username != "unknown":
-                        username = session_username
-                    else:
-                        # Log warning if username is not properly set
-                        logger.warning(f"[BACKGROUND] Username not properly set for session {session_id}, using 'unknown'")
-                        # Try to get username from session directory path as fallback
-                        session_dir = self.sessions[session_id].get('dir', '')
-                        if session_dir and '/audio/' in session_dir:
-                            # Extract username from path like "audio/username/session_id"
-                            path_parts = session_dir.split('/')
-                            if len(path_parts) >= 3 and path_parts[0] == 'audio':
-                                potential_username = path_parts[1]
-                                if potential_username and potential_username != 'session_' + session_id:
-                                    username = potential_username
-                                    logger.info(f"[BACKGROUND] Extracted username '{username}' from session directory path")
+            # Use provided username and session_count, or get from session info as fallback
+            if username is None or username == "unknown":
+                with self.session_lock:
+                    if session_id in self.sessions:
+                        session_username = self.sessions[session_id].get('username')
+                        if session_username and session_username != "unknown":
+                            username = session_username
+                        else:
+                            # Try to extract username from session directory path as fallback
+                            session_dir = self.sessions[session_id].get('dir', '')
+                            if session_dir and '/audio/' in session_dir:
+                                path_parts = session_dir.split('/')
+                                if len(path_parts) >= 3 and path_parts[0] == 'audio':
+                                    potential_username = path_parts[1]
+                                    if potential_username and potential_username != 'session_' + session_id:
+                                        username = potential_username
+                                        logger.info(f"[BACKGROUND] Extracted username '{username}' from session directory path")
+            
+            if session_count is None:
+                with self.session_lock:
+                    if session_id in self.sessions:
+                        session_count = self.sessions[session_id].get('session_count', 1)
             
             # If username is still "unknown", log a warning
             if username == "unknown":
@@ -1643,6 +1679,9 @@ class AudioProcessor:
             # Append transcription to session file (only content)
             with open(session_txt_filepath, 'a', encoding='utf-8') as session_file:
                 session_file.write(f"{output_data['text']}\n")
+                session_file.flush()             # Force flush buffers
+                os.fsync(session_file.fileno())  # Force flush to disk at OS level
+            # File is now fully flushed and closed
             
             logger.info(f"[BACKGROUND] Output saved - JSON: {json_filename}, Transcription appended to: {session_txt_filename}")
             
@@ -1932,12 +1971,109 @@ async def ui_websocket_endpoint(websocket: WebSocket):
             pass
         logger.info(f"UI client removed. Total connections: {len(active_connections)}")
 
+
+
+@app.post("/transcribe")
+async def transcribe(
+    type: str = Form(...),  # init, audio, end, get_messages
+    username: Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None),
+    chunk_id: Optional[int] = Form(None),
+    audio: Optional[UploadFile] = File(None)
+):
+    try:
+        # INIT SESSION
+        if type == "init":
+            if not username:
+                return JSONResponse(status_code=400, content={"error": "Missing username"})
+            session_id = str(uuid.uuid4())[:8]
+            session_audio_dir = f"audio/{username}/session_{session_id}"
+            os.makedirs(session_audio_dir, exist_ok=True)
+
+            session_count = get_next_session_count(username)
+            audio_processor.register_session(session_id, session_audio_dir, None, username)
+            audio_processor.update_session_username(session_id, username, session_count)
+
+            return {
+                "type": "initialized",
+                "username": username,
+                "session_id": session_id,
+                "session_count": session_count
+            }
+
+        # UPLOAD AUDIO CHUNK
+        elif type == "audio":
+            if not session_id or not chunk_id or not audio:
+                return JSONResponse(status_code=400, content={"error": "Missing session_id, chunk_id or audio file"})
+
+            session_info = audio_processor.sessions.get(session_id)
+            if not session_info:
+                return JSONResponse(status_code=404, content={"error": "Invalid session_id"})
+
+            session_audio_dir = session_info['dir']
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            chunk_filename = f"chunk_{chunk_id}_{timestamp}.wav"
+            chunk_filepath = safe_path_join(session_audio_dir, chunk_filename)
+
+            with open(chunk_filepath, 'wb') as out_file:
+                out_file.write(await audio.read())
+                out_file.flush()
+                os.fsync(out_file.fileno())
+
+            audio_processor.add_chunk_to_queue(session_id, chunk_filepath, chunk_id)
+
+            return {
+                "type": "audio_received",
+                "chunk": chunk_id,
+                "filename": chunk_filename
+            }
+
+        # END SESSION
+        elif type == "end":
+            if not session_id:
+                return JSONResponse(status_code=400, content={"error": "Missing session_id"})
+
+            if session_id not in audio_processor.sessions:
+                return JSONResponse(status_code=404, content={"error": "Invalid session_id"})
+
+            audio_processor.mark_session_complete(session_id)
+
+            return {
+                "type": "session_complete",
+                "session_id": session_id
+            }
+
+        # GET MESSAGES
+        elif type == "get_messages":
+            if not session_id:
+                return JSONResponse(status_code=400, content={"error": "Missing session_id"})
+
+            pending_messages = []
+            with audio_processor.session_lock:
+                if session_id in audio_processor.sessions:
+                    session_info = audio_processor.sessions[session_id]
+                    if 'pending_messages' in session_info:
+                        pending_messages = session_info['pending_messages'].copy()
+                        session_info['pending_messages'] = []
+
+            return {
+                "type": "messages",
+                "session_id": session_id,
+                "messages": pending_messages
+            }
+
+        else:
+            return JSONResponse(status_code=400, content={"error": f"Unknown type: {type}"})
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    
 if __name__ == "__main__":
     import uvicorn
     logger.info("Starting Faster-Whisper Real-time Transcription API server")
     uvicorn.run(
         app, 
-        host="192.168.1.42",  # Listen on all interfaces for server deployment
+        host="192.168.1.22",  # Listen on all interfaces for server deployment
         port=8111,
         timeout_keep_alive=3600,  # 1 hour keep-alive timeout
         timeout_graceful_shutdown=60,  # 1 minute graceful shutdown
