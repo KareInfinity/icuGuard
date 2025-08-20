@@ -359,6 +359,55 @@ async def cleanup_old_background_tasks():
     
     return {"message": f"Cleaned up {deleted_count} old background tasks"}
 
+@app.post("/transcribe/simple")
+async def transcribe_simple(
+    audio: UploadFile = File(...),
+    language: str = Form("en")
+):
+    """
+    Simple synchronous audio transcription endpoint
+    
+    Args:
+        audio: Audio file to transcribe (wav, mp3, etc.)
+        language: Language code (default: "en")
+    
+    Returns:
+        JSON with transcription text immediately
+    """
+    try:
+        logger.info(f"Simple transcribe request: {audio.filename} ({audio.content_type})")
+        
+        # Read audio file
+        audio_bytes = await audio.read()
+        file_size_mb = len(audio_bytes) / (1024 * 1024)
+        logger.info(f"Audio file size: {file_size_mb:.2f} MB")
+        
+        # Process immediately (synchronous)
+        result = transcribe_audio_bytes(audio_bytes)
+        
+        # Return simple response with just the text
+        response = {
+            "success": True,
+            "text": result.get("text", ""),
+            "language": result.get("language", "en"),
+            "confidence": result.get("confidence", 0.0),
+            "filename": audio.filename,
+            "file_size_mb": file_size_mb,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        logger.info(f"Simple transcription completed for {audio.filename}: '{result.get('text', '')[:100]}'")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error in simple transcription: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e),
+            "text": "",
+            "timestamp": datetime.now().isoformat()
+        }
+
 @app.post("/transcribe/audio-base64")
 async def transcribe_audio_base64(
     audio_data: str = Form(...),

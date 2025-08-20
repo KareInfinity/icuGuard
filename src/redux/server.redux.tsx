@@ -14,6 +14,10 @@ const serverSlice = createSlice({
     resetServerUrl: (state) => {
       state.customServerUrl = DEFAULT_SERVER_URL;
     },
+    forceUpdateServerUrl: (state) => {
+      // Force update to new default URL (useful for migrations)
+      state.customServerUrl = DEFAULT_SERVER_URL;
+    },
   },
 });
 

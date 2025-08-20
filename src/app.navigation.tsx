@@ -15,6 +15,7 @@ import {selectHasCompletedSetup} from './redux/user.redux';
 import {RecordingContainer} from './container/recording.container';
 import {AccountContainer} from './container/account.container';
 import {UsernamePromptContainer} from './container/username-prompt.container';
+import {TestingContainer} from './container/testing.container';
 
 export type AppModuleParamList = {
   homemodule: NavigatorScreenParams<HomeModuleParamList>;
@@ -66,8 +67,8 @@ export function AppNavigation() {
 }
 
 export type HomeModuleParamList = {
-  home: undefined;
   recording: undefined;
+  testing: undefined;
   account: {
     text: string;
   };
@@ -110,14 +111,27 @@ export function HomeModuleNavigation(props: HomeModuleNavigationProps) {
           ),
         }}
       />
+    
       <homemodule.Screen
         name="account"
         component={AccountContainer}
         options={{
           headerShown: false,
           tabBarIcon: ({color, size, focused}) => (
-            <Text style={{color: focused ? '#007AFF' : '#999', fontSize: 24}}>
+            <Text style={{color: focused ? '#007AFF' : '#999', fontSize:24}}>
               👤
+            </Text>
+          ),
+        }}
+      />
+        <homemodule.Screen
+        name="testing"
+        component={TestingContainer}
+        options={{
+          headerShown: false,
+          tabBarIcon: ({color, size, focused}) => (
+            <Text style={{color: focused ? '#007AFF' : '#999', fontSize: 24}}>
+              🧪
             </Text>
           ),
         }}

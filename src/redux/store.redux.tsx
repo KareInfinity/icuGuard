@@ -3,6 +3,7 @@ import {counteractions, counterreducers} from './counter.redux';
 import {transcriptionReducers} from './transcriptions.redux';
 import {serverReducers} from './server.redux';
 import {userReducers} from './user.redux';
+import {sessionReducers} from './session.redux';
 import {
   persistStore,
   persistReducer,
@@ -20,6 +21,7 @@ const rootReducer = combineReducers({
   transcriptions: transcriptionReducers,
   server: serverReducers,
   user: userReducers,
+  session: sessionReducers,
 });
 
 const persistedreducer = persistReducer(
@@ -30,6 +32,7 @@ const persistedreducer = persistReducer(
   },
   rootReducer,
 );
+
 export const store = configureStore({
   reducer: persistedreducer,
   middleware: getDefaultMiddleware =>
@@ -40,7 +43,9 @@ export const store = configureStore({
       serializableCheck: false,
     }),
 });
+
 export let persistor = persistStore(store);
+
 // Infer the `RootState` and `AppDispatch` types from the store itself
 export type RootState = ReturnType<typeof store.getState>;
 // Inferred type: {posts: PostsState, comments: CommentsState, users: UsersState}
