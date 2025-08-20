@@ -20,9 +20,11 @@ interface SessionData {
   totalTiming: string; // HH:MM:SS format
   startBattery: number;
   stopBattery?: number;
+  currentBattery?: number; // Added: current battery level during session
   isActive: boolean;
   chunksSent: number;
   currentChunkStartTime: number;
+  chunkInterval?: number; // Added: seconds between chunks
 }
 
 interface TranscriptionState {
@@ -140,7 +142,7 @@ const transcriptionsSlice = createSlice({
     },
     
     // Update session chunk information
-    updateSessionChunk: (state, action: PayloadAction<{sessionId: number; chunkCount: number; lastChunkTime: number}>) => {
+    updateSessionChunk: (state, action: PayloadAction<{sessionId: number; chunkCount: number; lastChunkTime: number; currentBattery?: number}>) => {
       console.log("Updating session chunk:", action.payload);
       
       const session = state.sessions.find(s => s.id === action.payload.sessionId);
@@ -148,6 +150,11 @@ const transcriptionsSlice = createSlice({
         session.chunksSent = action.payload.chunkCount;
         session.lastChunkSendTime = action.payload.lastChunkTime;
         session.currentChunkStartTime = action.payload.lastChunkTime;
+        
+        // Update current battery level if provided
+        if (action.payload.currentBattery !== undefined) {
+          session.currentBattery = action.payload.currentBattery;
+        }
       }
     },
     

@@ -12,6 +12,7 @@ import {
   Modal,
   FlatList,
   SectionList,
+  Platform,
 } from 'react-native';
 import {useDispatch, useSelector} from 'react-redux';
 import {selectUsername} from '../redux/user.redux';
@@ -34,9 +35,11 @@ interface SessionData {
   totalTiming: string;
   startBattery: number;
   stopBattery?: number;
+  currentBattery?: number; // Added: current battery level during session
   isActive: boolean;
   chunksSent: number;
   currentChunkStartTime: number;
+  chunkInterval?: number; // Added: seconds between chunks
 }
 
 export function TestingContainer() {
@@ -77,10 +80,61 @@ export function TestingContainer() {
   const currentSession = useSelector(selectCurrentSession);
   const pastSessions = useSelector(selectPastSessions);
 
-  // Initialize audio recorder
+  // Check audio permissions
+  const checkAudioPermissions = async () => {
+    try {
+      // For Android, we'll check if we can access the microphone
+      if (Platform.OS === 'android') {
+        const {PermissionsAndroid} = require('react-native');
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          {
+            title: 'Microphone Permission',
+            message:
+              'This app needs access to your microphone to record audio.',
+            buttonNeutral: 'Ask Me Later',
+            buttonNegative: 'Cancel',
+            buttonPositive: 'OK',
+          },
+        );
+
+        if (granted === PermissionsAndroid.RESULTS.GRANTED) {
+          addLog('✅ Microphone permission granted');
+          return true;
+        } else {
+          addLog('❌ Microphone permission denied');
+          return false;
+        }
+      }
+
+      // For iOS, permissions are handled differently
+      addLog('ℹ️ iOS audio permissions handled by system');
+      return true;
+    } catch (error) {
+      addLog(`❌ Permission check failed: ${String(error)}`);
+      return false;
+    }
+  };
+
+  // Initialize audio recorder with retry logic
   useEffect(() => {
-    const initializeAudioRecord = async () => {
+    const initializeAudioRecord = async (retryCount = 0) => {
       try {
+        addLog(`🔧 Initializing AudioRecord... (attempt ${retryCount + 1})`);
+
+        // Check if AudioRecord module is available
+        if (!AudioRecord || typeof AudioRecord.init !== 'function') {
+          throw new Error(
+            'AudioRecord module not properly imported or corrupted',
+          );
+        }
+
+        // Check permissions first
+        const hasPermission = await checkAudioPermissions();
+        if (!hasPermission) {
+          throw new Error('Microphone permission denied');
+        }
+
         const options = {
           sampleRate: 16000,
           channels: 1,
@@ -88,16 +142,63 @@ export function TestingContainer() {
           wavFile: 'voice_recording.wav',
         };
 
+        addLog(`📋 AudioRecord options: ${JSON.stringify(options)}`);
         await AudioRecord.init(options);
         setAudioRecordInitialized(true);
-        addLog('✅ Audio recorder initialized');
+        addLog('✅ Audio recorder initialized successfully');
       } catch (error) {
-        addLog('❌ Failed to initialize audio recorder');
-        Alert.alert('Audio Error', 'Failed to initialize audio recorder');
+        addLog(
+          `❌ AudioRecord init attempt ${retryCount + 1} failed: ${String(
+            error,
+          )}`,
+        );
+
+        if (retryCount < 3) {
+          // Wait 1 second before retrying
+          setTimeout(() => {
+            initializeAudioRecord(retryCount + 1);
+          }, 1000);
+        } else {
+          addLog('❌ Failed to initialize AudioRecord after all retries');
+          setAudioRecordInitialized(false);
+
+          const errorMessage = String(error);
+          if (errorMessage.includes('permission')) {
+            Alert.alert(
+              'Permission Required',
+              'Microphone permission is required. Please grant microphone access in your device settings and restart the app.',
+            );
+          } else {
+            Alert.alert(
+              'Audio Error',
+              'Failed to initialize audio recorder. Please restart the app and try again.',
+            );
+          }
+        }
       }
     };
 
-    initializeAudioRecord();
+    // Add a small delay to ensure the component is fully mounted
+    const timer = setTimeout(() => {
+      initializeAudioRecord();
+    }, 500);
+
+    return () => {
+      clearTimeout(timer);
+      // Cleanup recording state when component unmounts
+      if (isRecording) {
+        addLog('🧹 Cleaning up recording state on unmount');
+        if (recordingIntervalRef.current) {
+          clearInterval(recordingIntervalRef.current);
+        }
+        // Try to stop recording gracefully
+        if (typeof AudioRecord.stop === 'function') {
+          AudioRecord.stop().catch(() => {
+            // Ignore errors during cleanup
+          });
+        }
+      }
+    };
   }, []);
 
   const addLog = (message: string) => {
@@ -108,12 +209,35 @@ export function TestingContainer() {
   };
 
   const startRecording = async () => {
+    addLog(`🔍 AudioRecord state check: initialized=${audioRecordInitialized}`);
+
     if (!audioRecordInitialized) {
-      Alert.alert('Audio Error', 'Audio recorder not initialized');
+      addLog('❌ Cannot start recording: AudioRecord not initialized');
+      Alert.alert(
+        'Audio Error',
+        'Audio recorder not initialized. Please wait for initialization or use the "Reinitialize Audio" button.',
+      );
       return;
     }
 
     try {
+      addLog('🎤 Starting recording...');
+
+      // Double-check AudioRecord is available
+      if (typeof AudioRecord.start !== 'function') {
+        throw new Error(
+          'AudioRecord.start is not a function - module may be corrupted',
+        );
+      }
+
+      // Check if already recording
+      if (isRecording) {
+        addLog('⚠️ Already recording, stopping current recording first');
+        await stopRecording();
+        // Wait a bit before starting new recording
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
       await AudioRecord.start();
       setIsRecording(true);
       setRecordingDuration(0);
@@ -125,22 +249,90 @@ export function TestingContainer() {
         }
       }, 100);
 
-      addLog('🎤 Started recording');
+      addLog('✅ Recording started successfully');
     } catch (error) {
-      addLog(`❌ Recording failed: ${String(error)}`);
+      const errorMessage = String(error);
+      addLog(`❌ Recording failed: ${errorMessage}`);
+
+      // Check if it's the uninitialized error
+      if (
+        errorMessage.includes('uninitialized') ||
+        errorMessage.includes('not initialized')
+      ) {
+        addLog('🔄 AudioRecord lost initialization, resetting state');
+        setAudioRecordInitialized(false);
+        Alert.alert(
+          'Audio Error',
+          'Audio recorder lost initialization. Please use the "Reinitialize Audio" button and try again.',
+        );
+      } else if (
+        errorMessage.includes('permission') ||
+        errorMessage.includes('denied')
+      ) {
+        addLog('🚫 Audio permission denied');
+        Alert.alert(
+          'Permission Required',
+          'Audio recording permission is required. Please grant microphone access in your device settings.',
+        );
+      } else if (
+        errorMessage.includes('already recording') ||
+        errorMessage.includes('recording')
+      ) {
+        addLog('🔄 AudioRecord already recording, stopping first');
+        try {
+          await AudioRecord.stop();
+          addLog('✅ Stopped existing recording');
+          // Try starting again after a short delay
+          setTimeout(() => {
+            startRecording();
+          }, 1000);
+        } catch (stopError) {
+          addLog(`❌ Failed to stop existing recording: ${String(stopError)}`);
+        }
+      } else {
+        Alert.alert(
+          'Recording Error',
+          `Failed to start recording: ${errorMessage}`,
+        );
+      }
     }
   };
 
   const stopRecording = async () => {
-    if (!isRecording) return;
+    addLog(`🛑 Attempting to stop recording... (isRecording: ${isRecording})`);
+
+    if (!isRecording) {
+      addLog('⚠️ Not currently recording, nothing to stop');
+      return;
+    }
 
     try {
-      const audioFile = await AudioRecord.stop();
-      setIsRecording(false);
+      addLog('🔄 Stopping AudioRecord...');
 
+      // Check if AudioRecord.stop is available
+      if (typeof AudioRecord.stop !== 'function') {
+        throw new Error(
+          'AudioRecord.stop is not a function - module may be corrupted',
+        );
+      }
+
+      const audioFile = await AudioRecord.stop();
+      addLog(
+        `📁 AudioRecord.stop() returned: ${
+          audioFile ? 'file path' : 'null/undefined'
+        }`,
+      );
+
+      // Reset recording state
+      setIsRecording(false);
+      setRecordingDuration(0);
+      recordingStartTimeRef.current = null;
+
+      // Clear the recording interval
       if (recordingIntervalRef.current) {
         clearInterval(recordingIntervalRef.current);
         recordingIntervalRef.current = null;
+        addLog('⏱️ Recording interval cleared');
       }
 
       if (audioFile) {
@@ -154,10 +346,44 @@ export function TestingContainer() {
 
         dispatch(transcriptionActions.setCurrentRecording(recording));
         addLog(`✅ Recording saved: ${Math.round(recordingDuration / 1000)}s`);
+        addLog(`📁 File path: ${audioFile}`);
+      } else {
+        addLog('⚠️ AudioRecord.stop() returned no file path');
       }
+
+      addLog('✅ Recording stopped successfully');
     } catch (error) {
-      addLog(`❌ Failed to stop recording: ${String(error)}`);
+      const errorMessage = String(error);
+      addLog(`❌ Failed to stop recording: ${errorMessage}`);
+
+      // Force reset recording state even if there's an error
       setIsRecording(false);
+      setRecordingDuration(0);
+      recordingStartTimeRef.current = null;
+
+      if (recordingIntervalRef.current) {
+        clearInterval(recordingIntervalRef.current);
+        recordingIntervalRef.current = null;
+      }
+
+      // Check for specific error types
+      if (
+        errorMessage.includes('not recording') ||
+        errorMessage.includes('no recording')
+      ) {
+        addLog('ℹ️ AudioRecord was not recording, state reset');
+      } else if (errorMessage.includes('permission')) {
+        addLog('🚫 Permission error while stopping recording');
+        Alert.alert(
+          'Permission Error',
+          'Failed to stop recording due to permission issues.',
+        );
+      } else {
+        Alert.alert(
+          'Recording Error',
+          `Failed to stop recording: ${errorMessage}`,
+        );
+      }
     }
   };
 
@@ -185,30 +411,74 @@ export function TestingContainer() {
     return new Date(timestamp).toLocaleString();
   };
 
+  // Custom native battery module - most reliable method
   const getBatteryLevel = async (): Promise<number> => {
     try {
-      if (!NativeModules.RNDeviceInfo) {
-        addLog('⚠️ DeviceInfo native module not available');
-        return 100;
+      // Try our custom BatteryModule first (most reliable)
+      if (
+        NativeModules.BatteryModule &&
+        NativeModules.BatteryModule.getBatteryLevel
+      ) {
+        try {
+          const batteryLevel =
+            await NativeModules.BatteryModule.getBatteryLevel();
+          if (
+            typeof batteryLevel === 'number' &&
+            batteryLevel >= 0 &&
+            batteryLevel <= 100
+          ) {
+            setCurrentBatteryLevel(batteryLevel);
+            addLog(`🔋 Battery: ${batteryLevel}% (Custom BatteryModule)`);
+            return batteryLevel;
+          }
+        } catch (error) {
+          addLog(`⚠️ Custom BatteryModule failed: ${String(error)}`);
+        }
       }
 
-      const batteryLevel = await NativeModules.RNDeviceInfo.getBatteryLevel();
+      // Fallback to RNDeviceInfo if available
       if (
-        typeof batteryLevel === 'number' &&
-        batteryLevel >= 0 &&
-        batteryLevel <= 1
+        NativeModules.RNDeviceInfo &&
+        NativeModules.RNDeviceInfo.getBatteryLevel
       ) {
-        const batteryPercentage = Math.round(batteryLevel * 100);
-        setCurrentBatteryLevel(batteryPercentage);
-        addLog(`🔋 Battery: ${batteryPercentage}%`);
-        return batteryPercentage;
-      } else {
-        addLog('⚠️ Invalid battery level returned');
-        return 100;
+        try {
+          const batteryLevel =
+            await NativeModules.RNDeviceInfo.getBatteryLevel();
+          if (
+            typeof batteryLevel === 'number' &&
+            batteryLevel >= 0 &&
+            batteryLevel <= 1
+          ) {
+            const batteryPercentage = Math.round(batteryLevel * 100);
+            setCurrentBatteryLevel(batteryPercentage);
+            addLog(`🔋 Battery: ${batteryPercentage}% (RNDeviceInfo)`);
+            return batteryPercentage;
+          }
+        } catch (error) {
+          addLog(`⚠️ RNDeviceInfo failed: ${String(error)}`);
+        }
       }
+
+      addLog('⚠️ No battery level method available, using fallback');
+      return 100;
     } catch (error) {
       addLog(`❌ Error getting battery level: ${String(error)}`);
       return 100;
+    }
+  };
+
+  const getDetailedBatteryInfo = async () => {
+    try {
+      if (
+        NativeModules.BatteryModule &&
+        NativeModules.BatteryModule.getBatteryInfo
+      ) {
+        const batteryInfo = await NativeModules.BatteryModule.getBatteryInfo();
+        addLog(`🔋 Detailed Battery Info: ${JSON.stringify(batteryInfo)}`);
+        return batteryInfo;
+      }
+    } catch (error) {
+      addLog(`⚠️ Failed to get detailed battery info: ${String(error)}`);
     }
   };
 
@@ -383,14 +653,16 @@ export function TestingContainer() {
         lastChunkSendTime: now,
         totalTiming: '00:00:00',
         startBattery,
+        currentBattery: startBattery, // Initialize current battery with start battery
         isActive: true,
         chunksSent: 0,
         currentChunkStartTime: now,
+        chunkInterval: parseInt(chunkIntervalSeconds) || 20, // Store the chunk interval
       };
 
       setSessionId(sid);
       dispatch(transcriptionActions.addSession(sessionData));
-      addLog(`Session created: ${sid} (Battery: ${startBattery}%)`);
+      addLog(`Session created: ${sid} (Battery: ${startBattery}%, Chunk Interval: ${sessionData.chunkInterval}s)`);
 
       return {sessionId: sid.toString(), sessionData};
     } catch (error) {
@@ -401,7 +673,7 @@ export function TestingContainer() {
 
   const endSession = async (sid: number) => {
     try {
-      const chunkCount =sentCount;
+      const chunkCount = sentCount;
       const stopBattery = await getBatteryLevel();
 
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -422,7 +694,7 @@ export function TestingContainer() {
     }
   };
 
-  const sendAudioFile = async (
+    const sendAudioFile = async (
     filePath: string,
     chunkId: number,
     sessionId: number,
@@ -441,6 +713,10 @@ export function TestingContainer() {
       setSentCount(prev => prev + 1);
       addLog(`✅ Sent chunk ${chunkId}`);
 
+      // Get current battery level for this chunk
+      const currentBattery = await getBatteryLevel();
+      addLog(`🔋 Battery at chunk ${chunkId}: ${currentBattery}%`);
+
       // Update session chunk information using the sessionId parameter
       const now = Date.now();
       
@@ -449,8 +725,11 @@ export function TestingContainer() {
           sessionId: sessionId,
           chunkCount: chunkId,
           lastChunkTime: now,
+          currentBattery: currentBattery, // Add current battery level
         }),
       );
+      
+      addLog(`📊 Session ${sessionId} updated: Chunk ${chunkId}, Battery ${currentBattery}%`);
       
       // Force a re-render by updating local state
       setSentCount(chunkId);
@@ -579,9 +858,12 @@ export function TestingContainer() {
       </Text>
       <Text style={styles.sessionItemText}>Chunks: {item.chunksSent}</Text>
       <Text style={styles.sessionItemText}>
-        Battery: {item.startBattery}% → {item.stopBattery || 'N/A'}%
+        Battery: {item.startBattery}% → {item.currentBattery || item.stopBattery || 'N/A'}%
       </Text>
       <Text style={styles.sessionItemText}>Duration: {item.totalTiming}</Text>
+      <Text style={styles.sessionItemText}>
+        Chunk Interval: {item.chunkInterval || 'N/A'}s
+      </Text>
       <Text style={styles.sessionItemText}>
         Started: {formatDate(item.startTime)}
       </Text>
@@ -609,34 +891,7 @@ export function TestingContainer() {
   return (
     <ScrollView style={styles.container}>
       <Text style={styles.title}>Audio Recording & Testing</Text>
-      
-      {/* Clear Sessions Button */}
-      <TouchableOpacity
-        style={styles.clearSessionsButton}
-        onPress={() => {
-          Alert.alert(
-            'Clear All Sessions',
-            'Are you sure you want to clear all sessions? This will remove all active and past sessions.',
-            [
-              {text: 'Cancel', style: 'cancel'},
-              {
-                text: 'Clear All',
-                style: 'destructive',
-                onPress: () => {
-                  dispatch(transcriptionActions.clearSessions());
-                  setSessionId(null);
-                  setSentCount(0);
-                  setProcessedCount(0);
-                  setElapsedMs(0);
-                  chunkIdRef.current = 1;
-                  addLog('🗑️ All sessions cleared');
-                }
-              }
-            ]
-          );
-        }}>
-        <Text style={styles.clearSessionsButtonText}>Clear All Sessions</Text>
-      </TouchableOpacity>
+
 
       {/* Recording Controls */}
       <View style={styles.recordingContainer}>
@@ -644,31 +899,16 @@ export function TestingContainer() {
           style={[
             styles.button,
             isRecording ? styles.stopButton : styles.recordButton,
+            !audioRecordInitialized && styles.disabledButton,
           ]}
-          onPress={isRecording ? stopRecording : startRecording}>
+          onPress={isRecording ? stopRecording : startRecording}
+          disabled={!audioRecordInitialized}>
           <Text style={styles.buttonText}>
             {isRecording ? '⏹️ Stop Recording' : '🎤 Start Recording'}
           </Text>
         </TouchableOpacity>
-      </View>
 
-      {/* Recording Status */}
-      <View style={styles.statusContainer}>
-        <Text style={styles.statusText}>
-          {isRecording
-            ? `Recording: ${formatDuration(recordingDuration)}`
-            : 'Not recording'}
-        </Text>
-        {currentRecording && (
-          <Text style={styles.statusText}>
-            Selected: {currentRecording.name} (
-            {formatHMS(currentRecording.duration)})
-          </Text>
-        )}
-      </View>
-
-      {/* Start/Stop Sending */}
-      <View style={styles.sendContainer}>
+     
         {currentRecording ? (
           <TouchableOpacity
             style={[
@@ -689,6 +929,21 @@ export function TestingContainer() {
         )}
       </View>
 
+      {/* Recording Status */}
+      <View style={styles.statusContainer}>
+        <Text style={styles.statusText}>
+          {isRecording
+            ? `Recording: ${formatDuration(recordingDuration)}`
+            : 'Not recording'}
+        </Text>
+        {currentRecording && (
+          <Text style={styles.statusText}>
+            Selected: {currentRecording.name} (
+            {formatHMS(currentRecording.duration)})
+          </Text>
+        )}
+      </View>
+
       {/* Timing display */}
       {isRunning && (
         <View style={styles.timingContainer}>
@@ -702,35 +957,12 @@ export function TestingContainer() {
       <View style={styles.sessionsContainer}>
         <Text style={styles.sectionTitle}>All Sessions</Text>
 
-        {/* Active Session Status */}
-        {activeSession ? (
-          <View style={styles.activeSessionStatus}>
-            <Text style={styles.activeSessionTitle}>
-              🟢 Currently Active Session
-            </Text>
-            <Text style={styles.activeSessionText}>ID: {activeSession.id}</Text>
-            <Text style={styles.activeSessionText}>
-              Started: {formatDate(activeSession.startTime)}
-            </Text>
-            <Text style={styles.activeSessionText}>
-              Chunks Sent: {activeSession.chunksSent}
-            </Text>
-            <Text style={styles.activeSessionText}>
-              Duration: {activeSession.totalTiming}
-            </Text>
-          </View>
-        ) : (
-          <View style={styles.noActiveSession}>
-            <Text style={styles.noActiveSessionText}>No active session</Text>
-            <Text style={styles.noActiveSessionSubtext}>
-              Start recording to create a new session
-            </Text>
-          </View>
-        )}
-
         <SectionList
           sections={sessionSections}
-          key={`sessions-${sessions.length}-${sessions.reduce((sum, s) => sum + s.chunksSent, 0)}`}
+          key={`sessions-${sessions.length}-${sessions.reduce(
+            (sum, s) => sum + s.chunksSent,
+            0,
+          )}`}
           keyExtractor={item => item.id.toString()}
           renderItem={renderSessionItem}
           renderSectionHeader={({section: {title, data}}) => (
@@ -780,6 +1012,32 @@ export function TestingContainer() {
         </View>
       </Modal>
 
+      <TouchableOpacity
+        style={styles.clearSessionsButton}
+        onPress={() => {
+          Alert.alert(
+            'Clear All Sessions',
+            'Are you sure you want to clear all sessions? This will remove all active and past sessions.',
+            [
+              {text: 'Cancel', style: 'cancel'},
+              {
+                text: 'Clear All',
+                style: 'destructive',
+                onPress: () => {
+                  dispatch(transcriptionActions.clearSessions());
+                  setSessionId(null);
+                  setSentCount(0);
+                  setProcessedCount(0);
+                  setElapsedMs(0);
+                  chunkIdRef.current = 1;
+                  addLog('🗑️ All sessions cleared');
+                },
+              },
+            ],
+          );
+        }}>
+        <Text style={styles.clearSessionsButtonText}>Clear All Sessions</Text>
+      </TouchableOpacity>
       {/* Activity Log */}
       {/* <Text style={styles.logTitle}>Activity Log</Text>
       <ScrollView style={styles.logContainer}>
@@ -1037,5 +1295,66 @@ const styles = StyleSheet.create({
     color: 'white',
     fontWeight: 'bold',
     fontSize: 14,
+  },
+  batteryInfoButton: {
+    backgroundColor: '#4CAF50',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 16,
+    alignItems: 'center',
+  },
+  batteryInfoButtonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  audioStatusContainer: {
+    backgroundColor: '#f8f9fa',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 16,
+    alignItems: 'center',
+  },
+  audioStatusText: {
+    fontSize: 14,
+    color: '#333',
+    marginBottom: 8,
+    fontWeight: '500',
+  },
+  manualInitButton: {
+    backgroundColor: '#007bff',
+    padding: 8,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  manualInitButtonText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  disabledButton: {
+    backgroundColor: '#ccc',
+    opacity: 0.6,
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    width: '100%',
+    marginTop: 8,
+  },
+  permissionButton: {
+    backgroundColor: '#17a2b8',
+    padding: 8,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  permissionButtonText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  forceStopButton: {
+    backgroundColor: '#dc3545',
+    marginTop: 8,
   },
 });

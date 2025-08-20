@@ -18,6 +18,7 @@
     "react": "19.0.0",
     "react-native": "0.79.2",
     "react-native-audio-record": "^0.2.2",
+    "react-native-battery": "^0.1.18",
     "react-native-device-info": "^14.0.4",
     "react-native-fs": "^2.20.0",
     "react-native-recording": "^0.5.1",
