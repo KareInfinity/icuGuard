@@ -16,7 +16,6 @@ import {
 import {useDispatch, useSelector} from 'react-redux';
 import {selectUsername} from '../redux/user.redux';
 import {selectCustomServerUrl} from '../redux/server.redux';
-import store from '../redux/store.redux';
 import {
   transcriptionActions,
   selectCurrentRecording,
@@ -385,7 +384,7 @@ export function TestingContainer() {
         totalTiming: '00:00:00',
         startBattery,
         isActive: true,
-        chunksSent: 1,
+        chunksSent: 0,
         currentChunkStartTime: now,
       };
 
@@ -402,6 +401,7 @@ export function TestingContainer() {
 
   const endSession = async (sid: number) => {
     try {
+      const chunkCount =sentCount;
       const stopBattery = await getBatteryLevel();
 
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -441,41 +441,19 @@ export function TestingContainer() {
       setSentCount(prev => prev + 1);
       addLog(`✅ Sent chunk ${chunkId}`);
 
-      if (currentSession) {
-        const now = Date.now();
-        console.log("abv",chunkId);
-        
-        // Use only the updateSessionChunk action to avoid conflicts
-        dispatch(
-          transcriptionActions.updateSessionChunk({
-            sessionId: currentSession.id,
-            chunkCount: chunkId,
-            lastChunkTime: now,
-          }),
-        );
-
-        // Log the update for debugging
-        addLog(
-          `📊 Session ${currentSession.id} updated: Chunks=${chunkId}, Time=${new Date(now).toLocaleTimeString()}`,
-        );
-        
-        // Force a re-render by updating local state
-        setSentCount(chunkId);
-        
-        // Debug: Log the current Redux state after update
-        setTimeout(() => {
-          const currentState = store.getState();
-          const updatedSession = currentState.transcriptions.sessions.find((s: SessionData) => s.id === currentSession.id);
-          if (updatedSession) {
-            addLog(`🔍 Redux state check - Session ${updatedSession.id}: chunksSent=${updatedSession.chunksSent}, lastChunkSendTime=${updatedSession.lastChunkSendTime}`);
-          } else {
-            addLog(`❌ Session ${currentSession.id} not found in Redux state`);
-          }
-        }, 100);
-        
-        // Also log what we're trying to update
-        addLog(`📝 Attempting to update session ${currentSession.id}: chunksSent=${chunkId}, lastChunkSendTime=${now}`);
-      }
+      // Update session chunk information using the sessionId parameter
+      const now = Date.now();
+      
+      dispatch(
+        transcriptionActions.updateSessionChunk({
+          sessionId: sessionId,
+          chunkCount: chunkId,
+          lastChunkTime: now,
+        }),
+      );
+      
+      // Force a re-render by updating local state
+      setSentCount(chunkId);
     } catch (error) {
       addLog(`❌ Send failed chunk ${chunkId}: ${String(error)}`);
     }
@@ -593,30 +571,25 @@ export function TestingContainer() {
   }, []);
 
   // Render item for session list
-  const renderSessionItem = ({item}: {item: SessionData}) => {
-    // Debug logging to see what values are being rendered
-    console.log(`Rendering session ${item.id}: chunksSent=${item.chunksSent}, isActive=${item.isActive}`);
-    
-    return (
-      <View style={styles.sessionItem}>
-        <Text style={styles.sessionItemId}>ID: {item.id}</Text>
-        <Text style={styles.sessionItemText}>
-          Status: {item.isActive ? '🟢 Active' : '🔴 Inactive'}
-        </Text>
-        <Text style={styles.sessionItemText}>Chunks: {item.chunksSent}</Text>
-        <Text style={styles.sessionItemText}>
-          Battery: {item.startBattery}% → {item.stopBattery || 'N/A'}%
-        </Text>
-        <Text style={styles.sessionItemText}>Duration: {item.totalTiming}</Text>
-        <Text style={styles.sessionItemText}>
-          Started: {formatDate(item.startTime)}
-        </Text>
-        <Text style={styles.sessionItemText}>
-          Last chunk: {formatDate(item.lastChunkSendTime)}
-        </Text>
-      </View>
-    );
-  };
+  const renderSessionItem = ({item}: {item: SessionData}) => (
+    <View style={styles.sessionItem}>
+      <Text style={styles.sessionItemId}>ID: {item.id}</Text>
+      <Text style={styles.sessionItemText}>
+        Status: {item.isActive ? '🟢 Active' : '🔴 Inactive'}
+      </Text>
+      <Text style={styles.sessionItemText}>Chunks: {item.chunksSent}</Text>
+      <Text style={styles.sessionItemText}>
+        Battery: {item.startBattery}% → {item.stopBattery || 'N/A'}%
+      </Text>
+      <Text style={styles.sessionItemText}>Duration: {item.totalTiming}</Text>
+      <Text style={styles.sessionItemText}>
+        Started: {formatDate(item.startTime)}
+      </Text>
+      <Text style={styles.sessionItemText}>
+        Last chunk: {formatDate(item.lastChunkSendTime)}
+      </Text>
+    </View>
+  );
 
   // Group sessions by active/inactive
   const sessionSections = [
