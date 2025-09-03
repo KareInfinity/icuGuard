@@ -905,6 +905,7 @@ export function RecordingContainer(props: RecordingContainerProps) {
             shadowRadius: 4,
             elevation: 2,
           }}>
+            
           <View
             style={{
               flexDirection: 'row',
@@ -915,6 +916,7 @@ export function RecordingContainer(props: RecordingContainerProps) {
             <Text style={{fontSize: 16, fontWeight: '600', color: '#212529'}}>
               Server Configuration
             </Text>
+            
             <TouchableOpacity
               onPress={() => setShowServerInput(!showServerInput)}
               style={{
@@ -928,6 +930,10 @@ export function RecordingContainer(props: RecordingContainerProps) {
               </Text>
             </TouchableOpacity>
           </View>
+               <Text
+            style={{fontSize: 12, color: '#6c757d', fontFamily: 'monospace',   marginBottom: 10,}}>
+            Current: {customServerUrl}
+          </Text>
 
           {showServerInput && (
             <View style={{marginBottom: 8}}>
@@ -987,10 +993,7 @@ export function RecordingContainer(props: RecordingContainerProps) {
             </View>
           )}
 
-          <Text
-            style={{fontSize: 12, color: '#6c757d', fontFamily: 'monospace'}}>
-            Current: {customServerUrl}
-          </Text>
+     
         </View>
 
         {/* Test Button */}

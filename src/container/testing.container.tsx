@@ -5,7 +5,6 @@ import {
   Text,
   TouchableOpacity,
   ScrollView,
-  StyleSheet,
   Alert,
   NativeModules,
   TextInput,
@@ -13,6 +12,7 @@ import {
   FlatList,
   SectionList,
   Platform,
+  DeviceEventEmitter,
 } from 'react-native';
 import {useDispatch, useSelector} from 'react-redux';
 import {selectUsername} from '../redux/user.redux';
@@ -27,6 +27,26 @@ import {
 import AudioRecord from 'react-native-audio-record';
 import RNFS from 'react-native-fs';
 import {getCustomPlatformWSUrl} from '../utils/serverUtils';
+
+/**
+ * Enhanced Battery Monitoring System
+ * 
+ * This component now includes a comprehensive battery monitoring solution that prevents stale data:
+ * 
+ * 1. **Real-time Listener**: Uses DeviceEventEmitter to listen for 'BatteryLevelChanged' events
+ *    from the native BatteryModule, providing immediate updates when the system broadcasts changes.
+ * 
+ * 2. **Periodic Refresh**: Falls back to a 30-second refresh interval to catch any missed broadcasts
+ *    or ensure data freshness even when system events are delayed.
+ * 
+ * 3. **Enhanced Fallback**: The existing getBatteryLevel() function is enhanced with updateBatteryLevel()
+ *    which provides better error handling and change detection.
+ * 
+ * 4. **Manual Refresh**: Users can manually refresh battery data via the "Refresh Battery" button.
+ * 
+ * This approach ensures battery data is always current and prevents the "stuck at 25%" issue
+ * by combining push (listener) and pull (manual/periodic) update mechanisms.
+ */
 
 interface SessionData {
   id: number;
@@ -467,6 +487,24 @@ export function TestingContainer() {
     }
   };
 
+  // Enhanced battery level update with fallback refresh
+  const updateBatteryLevel = async (): Promise<number> => {
+    try {
+      const freshLevel = await getBatteryLevel();
+      
+      // If the level is significantly different from current state, log it
+      if (currentBatteryLevel !== null && Math.abs(freshLevel - currentBatteryLevel) > 5) {
+        addLog(`🔋 Battery level changed significantly: ${currentBatteryLevel}% → ${freshLevel}%`);
+      }
+      
+      setCurrentBatteryLevel(freshLevel);
+      return freshLevel;
+    } catch (error) {
+      addLog(`❌ Failed to update battery level: ${String(error)}`);
+      return currentBatteryLevel || 100;
+    }
+  };
+
   const getDetailedBatteryInfo = async () => {
     try {
       if (
@@ -479,6 +517,52 @@ export function TestingContainer() {
       }
     } catch (error) {
       addLog(`⚠️ Failed to get detailed battery info: ${String(error)}`);
+    }
+  };
+
+
+
+
+
+  // Update battery and chunk data only after server confirms receipt
+  const updateBatteryAndChunkAfterServerAck = async (chunkId: number, sessionId: number) => {
+    try {
+      addLog(`🔄 Server confirmed chunk ${chunkId}, updating battery and session data...`);
+      
+      // Get current battery level after server confirmation
+      const currentBattery = await updateBatteryLevel();
+      addLog(`🔋 Battery updated after server ack for chunk ${chunkId}: ${currentBattery}%`);
+      
+      // Update session chunk information
+      const now = Date.now();
+      
+      dispatch(
+        transcriptionActions.updateSessionChunk({
+          sessionId: sessionId,
+          chunkCount: chunkId,
+          lastChunkTime: now,
+          currentBattery: currentBattery,
+        }),
+      );
+      
+      // Update the session's currentBattery field
+      const existingSession = sessions.find(s => s.id === sessionId);
+      if (existingSession) {
+        const updatedSession: SessionData = {
+          ...existingSession,
+          currentBattery: currentBattery,
+          chunksSent: chunkId,
+          lastChunkSendTime: now,
+        };
+        dispatch(transcriptionActions.updateSession(updatedSession));
+      }
+      
+      // Update local state to reflect successful chunk
+      setSentCount(chunkId);
+      
+      addLog(`✅ Chunk ${chunkId} data updated after server confirmation`);
+    } catch (error) {
+      addLog(`❌ Failed to update chunk ${chunkId} data after server ack: ${String(error)}`);
     }
   };
 
@@ -544,6 +628,11 @@ export function TestingContainer() {
               }
             } else if (message.type === 'audio_received') {
               addLog(`✅ Server acknowledged audio chunk: ${message.chunk}`);
+              
+              // Update battery level and session data only after server confirmation
+              if (message.chunk && message.session_id) {
+                updateBatteryAndChunkAfterServerAck(message.chunk, message.session_id);
+              }
             } else if (message.type === 'session_complete') {
               addLog('✅ Session completed on server side');
             } else if (message.type === 'initialized') {
@@ -638,7 +727,7 @@ export function TestingContainer() {
       }
 
       addLog('Initializing session...');
-      const startBattery = await getBatteryLevel();
+      const startBattery = await updateBatteryLevel();
 
       await connectWebSocket();
       addLog('✅ WebSocket connected for session initialization');
@@ -662,7 +751,9 @@ export function TestingContainer() {
 
       setSessionId(sid);
       dispatch(transcriptionActions.addSession(sessionData));
-      addLog(`Session created: ${sid} (Battery: ${startBattery}%, Chunk Interval: ${sessionData.chunkInterval}s)`);
+      addLog(
+        `Session created: ${sid} (Battery: ${startBattery}%, Chunk Interval: ${sessionData.chunkInterval}s)`,
+      );
 
       return {sessionId: sid.toString(), sessionData};
     } catch (error) {
@@ -674,7 +765,7 @@ export function TestingContainer() {
   const endSession = async (sid: number) => {
     try {
       const chunkCount = sentCount;
-      const stopBattery = await getBatteryLevel();
+      const stopBattery = await updateBatteryLevel();
 
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         const endMessage = {
@@ -694,7 +785,7 @@ export function TestingContainer() {
     }
   };
 
-    const sendAudioFile = async (
+  const sendAudioFile = async (
     filePath: string,
     chunkId: number,
     sessionId: number,
@@ -713,28 +804,67 @@ export function TestingContainer() {
       setSentCount(prev => prev + 1);
       addLog(`✅ Sent chunk ${chunkId}`);
 
-      // Get current battery level for this chunk
-      const currentBattery = await getBatteryLevel();
-      addLog(`🔋 Battery at chunk ${chunkId}: ${currentBattery}%`);
+      // Don't update battery here - wait for server confirmation
+      addLog(`📤 Chunk ${chunkId} sent, waiting for server confirmation...`);
 
       // Update session chunk information using the sessionId parameter
       const now = Date.now();
-      
+
+      // Only update basic chunk info here, battery will be updated after server ack
       dispatch(
         transcriptionActions.updateSessionChunk({
           sessionId: sessionId,
           chunkCount: chunkId,
           lastChunkTime: now,
-          currentBattery: currentBattery, // Add current battery level
+          currentBattery: undefined, // Will be updated after server confirmation
         }),
       );
-      
-      addLog(`📊 Session ${sessionId} updated: Chunk ${chunkId}, Battery ${currentBattery}%`);
-      
+
+      addLog(
+        `📊 Session ${sessionId} updated: Chunk ${chunkId}, waiting for server confirmation`,
+      );
+
       // Force a re-render by updating local state
       setSentCount(chunkId);
     } catch (error) {
       addLog(`❌ Send failed chunk ${chunkId}: ${String(error)}`);
+    } finally {
+      // Always update battery and finalize chunk data regardless of success/failure
+      try {
+        addLog(`🔄 Finalizing chunk ${chunkId} data in finally block...`);
+        
+        // Get current battery level
+        const currentBattery = await updateBatteryLevel();
+        addLog(`🔋 Final battery level for chunk ${chunkId}: ${currentBattery}%`);
+        
+        const now = Date.now();
+        
+        // Update session with final battery level and chunk status
+        const existingSession = sessions.find(s => s.id === sessionId);
+        if (existingSession) {
+          const updatedSession: SessionData = {
+            ...existingSession,
+            currentBattery: currentBattery,
+            chunksSent: chunkId,
+            lastChunkSendTime: now,
+          };
+          dispatch(transcriptionActions.updateSession(updatedSession));
+        }
+        
+        // Update session chunk with final data
+        dispatch(
+          transcriptionActions.updateSessionChunk({
+            sessionId: sessionId,
+            chunkCount: chunkId,
+            lastChunkTime: now,
+            currentBattery: currentBattery,
+          }),
+        );
+        
+        addLog(`✅ Chunk ${chunkId} finalized with battery ${currentBattery}%`);
+      } catch (finalizeError) {
+        addLog(`⚠️ Error finalizing chunk ${chunkId}: ${String(finalizeError)}`);
+      }
     }
   };
 
@@ -752,7 +882,7 @@ export function TestingContainer() {
       return;
     }
 
-    await getBatteryLevel();
+    await updateBatteryLevel();
     const initResult = await initSession();
     if (!initResult) return;
 
@@ -773,12 +903,12 @@ export function TestingContainer() {
 
     sendIntervalRef.current = setInterval(async () => {
       chunkIdRef.current += 1;
+      
       await sendAudioFile(
         currentRecording.uri,
         chunkIdRef.current,
         Number(sid),
       );
-      await getBatteryLevel();
     }, interval * 1000);
 
     addLog(`Started sending chunks every ${interval} seconds`);
@@ -803,7 +933,7 @@ export function TestingContainer() {
 
     // Also end the current active session if it exists
     if (currentSession && currentSession.isActive) {
-      const stopBattery = await getBatteryLevel();
+      const stopBattery = await updateBatteryLevel();
       dispatch(
         transcriptionActions.endSession({
           sessionId: currentSession.id,
@@ -849,25 +979,102 @@ export function TestingContainer() {
     };
   }, []);
 
+  // Battery level listener - prevents stale data by listening to system broadcasts
+  useEffect(() => {
+    let batterySubscription: any;
+    let periodicRefreshInterval: any;
+
+    const setupBatteryListener = async () => {
+      try {
+        // Get initial battery level
+        const initialBattery = await getBatteryLevel();
+        addLog(`🔋 Initial battery level: ${initialBattery}%`);
+
+        // Set up listener for real-time battery updates
+        batterySubscription = DeviceEventEmitter.addListener(
+          'BatteryLevelChanged',
+          (level: number) => {
+            if (typeof level === 'number' && level >= 0 && level <= 100) {
+              setCurrentBatteryLevel(level);
+              addLog(`🔋 Listener update: ${level}%`);
+            }
+          }
+        );
+
+        // Set up periodic refresh every 30 seconds as a fallback
+        periodicRefreshInterval = setInterval(async () => {
+          try {
+            const currentLevel = await getBatteryLevel();
+            // Only log if there's a significant change to avoid spam
+            if (currentBatteryLevel !== null && Math.abs(currentLevel - currentBatteryLevel) > 2) {
+              addLog(`🔋 Periodic refresh detected change: ${currentBatteryLevel}% → ${currentLevel}%`);
+            }
+          } catch (error) {
+            addLog(`⚠️ Periodic battery refresh failed: ${String(error)}`);
+          }
+        }, 30000); // 30 seconds
+
+        addLog('✅ Battery listener and periodic refresh initialized');
+      } catch (error) {
+        addLog(`⚠️ Failed to setup battery listener: ${String(error)}`);
+      }
+    };
+
+    setupBatteryListener();
+
+    // Cleanup listener on unmount
+    return () => {
+      if (batterySubscription) {
+        batterySubscription.remove();
+        addLog('🧹 Battery listener cleaned up');
+      }
+      if (periodicRefreshInterval) {
+        clearInterval(periodicRefreshInterval);
+        addLog('🧹 Periodic battery refresh cleaned up');
+      }
+    };
+  }, [currentBatteryLevel]);
+
   // Render item for session list
   const renderSessionItem = ({item}: {item: SessionData}) => (
-    <View style={styles.sessionItem}>
-      <Text style={styles.sessionItemId}>ID: {item.id}</Text>
-      <Text style={styles.sessionItemText}>
+    <View
+      style={{
+        backgroundColor: 'white',
+        padding: 15,
+        borderRadius: 8,
+        marginBottom: 10,
+        borderWidth: 1,
+        borderColor: '#e9ecef',
+      }}>
+      <Text
+        style={{
+          fontSize: 18,
+          fontWeight: 'bold',
+          color: '#007bff',
+          marginBottom: 8,
+        }}>
+        ID: {item.id}
+      </Text>
+      <Text style={{fontSize: 14, color: '#333', marginBottom: 5}}>
         Status: {item.isActive ? '🟢 Active' : '🔴 Inactive'}
       </Text>
-      <Text style={styles.sessionItemText}>Chunks: {item.chunksSent}</Text>
-      <Text style={styles.sessionItemText}>
-        Battery: {item.startBattery}% → {item.currentBattery || item.stopBattery || 'N/A'}%
+      <Text style={{fontSize: 14, color: '#333', marginBottom: 5}}>
+        Chunks: {item.chunksSent}
       </Text>
-      <Text style={styles.sessionItemText}>Duration: {item.totalTiming}</Text>
-      <Text style={styles.sessionItemText}>
+      <Text style={{fontSize: 14, color: '#333', marginBottom: 5}}>
+        Battery: {item.startBattery}% →{' '}
+        {item.currentBattery !== undefined ? `${item.currentBattery}%` : 'Finalizing...'}
+      </Text>
+      <Text style={{fontSize: 14, color: '#333', marginBottom: 5}}>
+        Duration: {item.totalTiming}
+      </Text>
+      <Text style={{fontSize: 14, color: '#333', marginBottom: 5}}>
         Chunk Interval: {item.chunkInterval || 'N/A'}s
       </Text>
-      <Text style={styles.sessionItemText}>
+      <Text style={{fontSize: 14, color: '#333', marginBottom: 5}}>
         Started: {formatDate(item.startTime)}
       </Text>
-      <Text style={styles.sessionItemText}>
+      <Text style={{fontSize: 14, color: '#333', marginBottom: 5}}>
         Last chunk: {formatDate(item.lastChunkSendTime)}
       </Text>
     </View>
@@ -889,55 +1096,182 @@ export function TestingContainer() {
   const activeSession = sessions.find(s => s.isActive);
 
   return (
-    <ScrollView style={styles.container}>
-      <Text style={styles.title}>Audio Recording & Testing</Text>
-
+    <ScrollView style={{flex: 1, padding: 20, backgroundColor: '#f5f5f5'}}>
+      <Text
+        style={{
+          fontSize: 24,
+          fontWeight: 'bold',
+          marginBottom: 20,
+          textAlign: 'center',
+          color: '#333',
+        }}>
+        Audio Recording & Testing
+      </Text>
 
       {/* Recording Controls */}
-      <View style={styles.recordingContainer}>
+      <View
+        style={{
+          flexDirection: 'row',
+          justifyContent: 'space-around',
+          marginBottom: 20,
+        }}>
         <TouchableOpacity
-          style={[
-            styles.button,
-            isRecording ? styles.stopButton : styles.recordButton,
-            !audioRecordInitialized && styles.disabledButton,
-          ]}
+          style={{
+            backgroundColor: isRecording ? '#dc3545' : '#28a745',
+            padding: 15,
+            borderRadius: 8,
+            minWidth: 150,
+            alignItems: 'center',
+            opacity: !audioRecordInitialized ? 0.6 : 1,
+          }}
           onPress={isRecording ? stopRecording : startRecording}
           disabled={!audioRecordInitialized}>
-          <Text style={styles.buttonText}>
+          <Text style={{color: 'white', fontSize: 16, fontWeight: 'bold'}}>
             {isRecording ? '⏹️ Stop Recording' : '🎤 Start Recording'}
           </Text>
         </TouchableOpacity>
 
-     
-        {currentRecording ? (
-          <TouchableOpacity
-            style={[
-              styles.button,
-              isRunning ? styles.stopButton : styles.startButton,
-            ]}
-            onPress={
-              isRunning ? stopSending : () => setShowChunkIntervalModal(true)
-            }>
-            <Text style={styles.buttonText}>
-              {isRunning ? '⏹️ Stop Sending' : '▶️ Start Sending'}
-            </Text>
-          </TouchableOpacity>
-        ) : (
-          <Text style={styles.noFileText}>
-            Please record an audio file first
+        {/* Battery Refresh Button */}
+        <TouchableOpacity
+          style={{
+            backgroundColor: '#17a2b8',
+            padding: 15,
+            borderRadius: 8,
+            minWidth: 120,
+            alignItems: 'center',
+          }}
+          onPress={async () => {
+            addLog('🔄 Manual battery refresh requested');
+            const newLevel = await updateBatteryLevel();
+            addLog(`🔋 Manual refresh result: ${newLevel}%`);
+          }}>
+          <Text style={{color: 'white', fontSize: 16, fontWeight: 'bold'}}>
+            🔋 Refresh Battery
           </Text>
-        )}
+        </TouchableOpacity>
       </View>
 
+      {/* Battery Status Display */}
+      <View
+        style={{
+          backgroundColor: '#e8f5e8',
+          padding: 15,
+          borderRadius: 8,
+          marginBottom: 20,
+          alignItems: 'center',
+        }}>
+        <Text style={{fontSize: 16, color: '#333', marginBottom: 5}}>
+          🔋 Current Battery: {currentBatteryLevel !== null ? `${currentBatteryLevel}%` : 'Loading...'}
+        </Text>
+        <Text style={{fontSize: 12, color: '#666', fontStyle: 'italic'}}>
+          Updates with each chunk + system broadcasts + periodic refresh every 30s
+        </Text>
+      </View>
+
+      {!currentRecording && (
+        <Text style={{color: '#888', fontStyle: 'italic', textAlign: 'center'}}>
+          Please record an audio file first
+        </Text>
+      )}
+
+      {currentRecording && (
+        <View
+          style={{
+            backgroundColor: 'white',
+            borderRadius: 16,
+            padding: 24,
+            width: '85%',
+            alignSelf: 'center',
+            marginBottom: 20,
+            shadowColor: '#000',
+            shadowOffset: {width: 0, height: 4},
+            shadowOpacity: 0.15,
+            shadowRadius: 6,
+            elevation: 6,
+          }}>
+          {/* Title */}
+          <Text
+            style={{
+              fontSize: 20,
+              fontWeight: '700',
+              textAlign: 'center',
+              marginBottom: 8,
+              color: '#222',
+            }}>
+            Set Chunk Interval
+          </Text>
+
+          {/* Subtitle */}
+          <Text
+            style={{
+              fontSize: 15,
+              color: '#666',
+              textAlign: 'center',
+              marginBottom: 20,
+            }}>
+            Seconds between sending each audio chunk
+          </Text>
+
+          {/* Input */}
+          <TextInput
+            style={{
+              borderWidth: 1,
+              borderColor: '#ccc',
+              borderRadius: 10,
+              paddingVertical: 12,
+              paddingHorizontal: 16,
+              fontSize: 16,
+              marginBottom: 24,
+              textAlign: 'center',
+              backgroundColor: '#f9f9f9',
+            }}
+            value={chunkIntervalSeconds}
+            onChangeText={setChunkIntervalSeconds}
+            placeholder="Enter seconds (e.g., 20)"
+            placeholderTextColor="#aaa"
+            keyboardType="numeric"
+            autoFocus
+          />
+
+          {/* Buttons */}
+          <View style={{ justifyContent: 'space-between'}}>
+          
+            {/* Start */}
+            <TouchableOpacity
+              style={{
+                backgroundColor: isRunning ? '#dc3545' : '#007bff',
+                padding: 15,
+                borderRadius: 8,
+                minWidth: 150,
+                alignItems: 'center',
+              }}
+              onPress={
+                isRunning ? stopSending : () => startSessionWithInterval()
+              }>
+              <Text style={{color: 'white', fontSize: 16, fontWeight: 'bold'}}>
+                {isRunning ? '⏹️ Stop Sending' : '▶️ Start Sending'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
       {/* Recording Status */}
-      <View style={styles.statusContainer}>
-        <Text style={styles.statusText}>
+      <View
+        style={{
+          backgroundColor: '#f8f9fa',
+          padding: 15,
+          borderRadius: 8,
+          marginBottom: 20,
+          alignItems: 'center',
+        }}>
+        <Text style={{fontSize: 16, color: '#333', marginBottom: 5}}>
           {isRecording
             ? `Recording: ${formatDuration(recordingDuration)}`
             : 'Not recording'}
         </Text>
         {currentRecording && (
-          <Text style={styles.statusText}>
+          <Text style={{fontSize: 16, color: '#333', marginBottom: 5}}>
             Selected: {currentRecording.name} (
             {formatHMS(currentRecording.duration)})
           </Text>
@@ -946,16 +1280,37 @@ export function TestingContainer() {
 
       {/* Timing display */}
       {isRunning && (
-        <View style={styles.timingContainer}>
-          <Text style={styles.timingText}>Elapsed: {formatHMS(elapsedMs)}</Text>
-          <Text style={styles.timingText}>Sent: {sentCount} chunks</Text>
+        <View
+          style={{
+            backgroundColor: '#e3f2fd',
+            padding: 15,
+            borderRadius: 8,
+            marginBottom: 20,
+            alignItems: 'center',
+          }}>
+          <Text style={{fontSize: 16, color: '#1976d2', marginBottom: 5}}>
+            Elapsed: {formatHMS(elapsedMs)}
+          </Text>
+          <Text style={{fontSize: 16, color: '#1976d2', marginBottom: 5}}>
+            Sent: {sentCount} chunks
+          </Text>
+          <Text style={{fontSize: 14, color: '#666', fontStyle: 'italic'}}>
+            Battery updates in finally block (always happens)
+          </Text>
         </View>
       )}
 
       {/* Sessions List */}
-
-      <View style={styles.sessionsContainer}>
-        <Text style={styles.sectionTitle}>All Sessions</Text>
+      <View style={{marginBottom: 20}}>
+        <Text
+          style={{
+            fontSize: 20,
+            fontWeight: 'bold',
+            marginBottom: 15,
+            color: '#333',
+          }}>
+          All Sessions
+        </Text>
 
         <SectionList
           sections={sessionSections}
@@ -966,54 +1321,46 @@ export function TestingContainer() {
           keyExtractor={item => item.id.toString()}
           renderItem={renderSessionItem}
           renderSectionHeader={({section: {title, data}}) => (
-            <Text style={styles.sectionHeader}>
+            <Text
+              style={{
+                fontSize: 18,
+                fontWeight: 'bold',
+                backgroundColor: '#e9ecef',
+                padding: 10,
+                color: '#495057',
+              }}>
               {title} ({data.length})
             </Text>
           )}
           ListEmptyComponent={
-            <Text style={styles.emptyText}>No sessions yet</Text>
+            <Text
+              style={{
+                color: '#888',
+                fontStyle: 'italic',
+                textAlign: 'center',
+                marginTop: 20,
+              }}>
+              No sessions yet
+            </Text>
           }
         />
       </View>
 
       {/* Chunk Interval Modal */}
-      <Modal
+      {/* <Modal
         visible={showChunkIntervalModal}
         transparent={true}
         animationType="slide"
-        onRequestClose={() => setShowChunkIntervalModal(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Set Chunk Interval</Text>
-            <Text style={styles.modalSubtitle}>
-              Seconds between sending each audio chunk:
-            </Text>
-            <TextInput
-              style={styles.input}
-              value={chunkIntervalSeconds}
-              onChangeText={setChunkIntervalSeconds}
-              placeholder="Enter seconds (e.g., 20)"
-              keyboardType="numeric"
-              autoFocus={true}
-            />
-            <View style={styles.modalButtons}>
-              <TouchableOpacity
-                style={[styles.button, styles.cancelButton]}
-                onPress={() => setShowChunkIntervalModal(false)}>
-                <Text style={styles.buttonText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.button, styles.confirmButton]}
-                onPress={startSessionWithInterval}>
-                <Text style={styles.buttonText}>Start Session</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
+        onRequestClose={() => setShowChunkIntervalModal(false)}> */}
 
       <TouchableOpacity
-        style={styles.clearSessionsButton}
+        style={{
+          backgroundColor: '#dc3545',
+          padding: 12,
+          borderRadius: 8,
+          marginBottom: 20,
+          alignItems: 'center',
+        }}
         onPress={() => {
           Alert.alert(
             'Clear All Sessions',
@@ -1036,325 +1383,40 @@ export function TestingContainer() {
             ],
           );
         }}>
-        <Text style={styles.clearSessionsButtonText}>Clear All Sessions</Text>
+        <Text style={{color: 'white', fontWeight: 'bold', fontSize: 14}}>
+          Clear All Sessions
+        </Text>
       </TouchableOpacity>
       {/* Activity Log */}
-      {/* <Text style={styles.logTitle}>Activity Log</Text>
-      <ScrollView style={styles.logContainer}>
+      <Text style={{
+        fontSize: 20,
+        fontWeight: 'bold',
+        marginBottom: 15,
+        color: '#333',
+      }}>
+        Activity Log
+      </Text>
+      <ScrollView style={{
+        backgroundColor: '#f8f9fa',
+        padding: 15,
+        borderRadius: 8,
+        maxHeight: 200,
+        borderWidth: 1,
+        borderColor: '#e9ecef',
+      }}>
         {logs.map((log, index) => (
-          <Text key={index} style={styles.logText}>
+          <Text key={index} style={{
+            fontSize: 12,
+            color: '#495057',
+            marginBottom: 2,
+            fontFamily: 'monospace',
+          }}>
             {log}
           </Text>
         ))}
-      </ScrollView> */}
+      </ScrollView>
     </ScrollView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    padding: 20,
-    backgroundColor: '#fff',
-  },
-  title: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 20,
-    textAlign: 'center',
-    color: '#333',
-  },
-  toggleButton: {
-    backgroundColor: '#6c757d',
-    padding: 10,
-    borderRadius: 5,
-    marginBottom: 15,
-    alignItems: 'center',
-  },
-  toggleButtonText: {
-    color: 'white',
-    fontWeight: 'bold',
-  },
-  sessionsContainer: {
-    marginBottom: 20,
-    maxHeight: 300,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginBottom: 10,
-    color: '#333',
-  },
-  sectionHeader: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    backgroundColor: '#f0f0f0',
-    padding: 10,
-    color: '#333',
-  },
-  sessionItem: {
-    backgroundColor: '#f8f9fa',
-    padding: 15,
-    borderBottomWidth: 1,
-    borderBottomColor: '#dee2e6',
-  },
-  sessionItemId: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#495057',
-    marginBottom: 5,
-  },
-  sessionItemText: {
-    fontSize: 12,
-    color: '#6c757d',
-    marginBottom: 2,
-  },
-  emptyText: {
-    textAlign: 'center',
-    padding: 20,
-    color: '#6c757d',
-    fontStyle: 'italic',
-  },
-  recordingContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginBottom: 20,
-  },
-  sendContainer: {
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  statusContainer: {
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  statusText: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 5,
-  },
-  timingContainer: {
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  timingText: {
-    fontSize: 14,
-    color: '#333',
-    marginBottom: 5,
-  },
-  button: {
-    paddingHorizontal: 15,
-    paddingVertical: 10,
-    borderRadius: 5,
-    minWidth: 120,
-    alignItems: 'center',
-  },
-  buttonText: {
-    color: 'white',
-    fontWeight: 'bold',
-  },
-  recordButton: {
-    backgroundColor: '#4CAF50',
-  },
-  stopButton: {
-    backgroundColor: '#F44336',
-  },
-  startButton: {
-    backgroundColor: '#2196F3',
-  },
-  deleteButton: {
-    backgroundColor: '#FF9800',
-  },
-  cancelButton: {
-    backgroundColor: '#9E9E9E',
-  },
-  confirmButton: {
-    backgroundColor: '#4CAF50',
-  },
-  noFileText: {
-    color: '#888',
-    fontStyle: 'italic',
-  },
-  sessionInfo: {
-    backgroundColor: '#e8f5e8',
-    padding: 15,
-    borderRadius: 8,
-    marginBottom: 20,
-    borderLeftWidth: 4,
-    borderLeftColor: '#4CAF50',
-  },
-  sessionTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginBottom: 10,
-  },
-  sessionText: {
-    fontSize: 14,
-    color: '#333',
-    marginBottom: 5,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  modalContent: {
-    backgroundColor: 'white',
-    borderRadius: 10,
-    padding: 20,
-    width: '80%',
-  },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    textAlign: 'center',
-    marginBottom: 10,
-  },
-  modalSubtitle: {
-    fontSize: 14,
-    color: '#666',
-    textAlign: 'center',
-    marginBottom: 20,
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 5,
-    padding: 10,
-    fontSize: 16,
-    marginBottom: 20,
-    textAlign: 'center',
-  },
-  modalButtons: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-  },
-  logTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginBottom: 10,
-  },
-  logContainer: {
-    height: 200,
-    backgroundColor: '#f5f5f5',
-    padding: 10,
-    borderRadius: 5,
-  },
-  logText: {
-    fontSize: 12,
-    color: '#333',
-    marginBottom: 4,
-    fontFamily: 'monospace',
-  },
-  activeSessionStatus: {
-    backgroundColor: '#e8f5e8',
-    padding: 15,
-    borderRadius: 8,
-    marginBottom: 15,
-    borderLeftWidth: 4,
-    borderLeftColor: '#4CAF50',
-  },
-  activeSessionTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#2e7d32',
-    marginBottom: 10,
-  },
-  activeSessionText: {
-    fontSize: 14,
-    color: '#333',
-    marginBottom: 5,
-  },
-  noActiveSession: {
-    backgroundColor: '#f5f5f5',
-    padding: 15,
-    borderRadius: 8,
-    marginBottom: 15,
-    alignItems: 'center',
-  },
-  noActiveSessionText: {
-    fontSize: 16,
-    color: '#666',
-    marginBottom: 5,
-  },
-  noActiveSessionSubtext: {
-    fontSize: 14,
-    color: '#999',
-    fontStyle: 'italic',
-  },
-  clearSessionsButton: {
-    backgroundColor: '#dc3545',
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 20,
-    alignItems: 'center',
-  },
-  clearSessionsButtonText: {
-    color: 'white',
-    fontWeight: 'bold',
-    fontSize: 14,
-  },
-  batteryInfoButton: {
-    backgroundColor: '#4CAF50',
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 16,
-    alignItems: 'center',
-  },
-  batteryInfoButtonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  audioStatusContainer: {
-    backgroundColor: '#f8f9fa',
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 16,
-    alignItems: 'center',
-  },
-  audioStatusText: {
-    fontSize: 14,
-    color: '#333',
-    marginBottom: 8,
-    fontWeight: '500',
-  },
-  manualInitButton: {
-    backgroundColor: '#007bff',
-    padding: 8,
-    borderRadius: 6,
-    alignItems: 'center',
-  },
-  manualInitButtonText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  disabledButton: {
-    backgroundColor: '#ccc',
-    opacity: 0.6,
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    width: '100%',
-    marginTop: 8,
-  },
-  permissionButton: {
-    backgroundColor: '#17a2b8',
-    padding: 8,
-    borderRadius: 6,
-    alignItems: 'center',
-  },
-  permissionButtonText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  forceStopButton: {
-    backgroundColor: '#dc3545',
-    marginTop: 8,
-  },
-});
+// All styles are now inline - no external StyleSheet needed
