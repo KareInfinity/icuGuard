@@ -81,6 +81,7 @@ export function TestingContainer() {
   const [wsConnected, setWsConnected] = useState(false);
   const [wsConnecting, setWsConnecting] = useState(false);
   const [showSessionsList, setShowSessionsList] = useState(false);
+  const [batteryThreshold, setBatteryThreshold] = useState<number>(5); // Battery threshold for auto-stop
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const sendIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -505,6 +506,69 @@ export function TestingContainer() {
     }
   };
 
+  // Check battery level and auto-stop if below threshold
+  const checkBatteryAndAutoStop = async (): Promise<boolean> => {
+    try {
+      const currentBattery = await updateBatteryLevel();
+      
+      if (currentBattery <= batteryThreshold) {
+        addLog(`🔋⚠️ Battery level critical: ${currentBattery}% (threshold: ${batteryThreshold}%)`);
+        addLog(`🛑 Auto-stopping session due to low battery`);
+        
+        // Show alert to user
+        // Alert.alert(
+        //   'Low Battery Warning',
+        //   `Battery level is at ${currentBattery}% (below ${batteryThreshold}% threshold). Session will be stopped automatically to preserve battery.`,
+        //   [{ text: 'OK' }]
+        // );
+        
+        // Immediately stop all running states
+        setIsRunning(false);
+        
+        // Clear all intervals immediately
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+        }
+        if (sendIntervalRef.current) {
+          clearInterval(sendIntervalRef.current);
+          sendIntervalRef.current = null;
+        }
+        
+        // Stop the session and mark as inactive
+        await stopSending();
+        
+        // End ALL active sessions due to low battery
+        const activeSessions = sessions.filter(s => s.isActive);
+        if (activeSessions.length > 0) {
+          addLog(`🔋⚠️ Ending all ${activeSessions.length} active sessions due to low battery`);
+          for (const session of activeSessions) {
+            const stopBattery = await updateBatteryLevel();
+            dispatch(
+              transcriptionActions.endSession({
+                sessionId: session.id,
+                stopBattery,
+              }),
+            );
+            addLog(`✅ Session ${session.id} ended due to low battery (${stopBattery}%)`);
+          }
+        }
+        
+        // Force update to ensure UI reflects the stopped state
+        setElapsedMs(0);
+        setSentCount(0);
+        
+        addLog(`🛑 All sessions stopped due to low battery`);
+        return true; // Indicates session was stopped
+      }
+      
+      return false; // Session continues
+    } catch (error) {
+      addLog(`❌ Failed to check battery for auto-stop: ${String(error)}`);
+      return false;
+    }
+  };
+
   const getDetailedBatteryInfo = async () => {
     try {
       if (
@@ -528,6 +592,13 @@ export function TestingContainer() {
   const updateBatteryAndChunkAfterServerAck = async (chunkId: number, sessionId: number) => {
     try {
       addLog(`🔄 Server confirmed chunk ${chunkId}, updating battery and session data...`);
+      
+      // Check battery level and auto-stop if necessary
+      const wasStopped = await checkBatteryAndAutoStop();
+      if (wasStopped) {
+        addLog(`🛑 Session stopped due to low battery after chunk ${chunkId}`);
+        return;
+      }
       
       // Get current battery level after server confirmation
       const currentBattery = await updateBatteryLevel();
@@ -793,6 +864,13 @@ export function TestingContainer() {
     try {
       addLog(`Sending chunk ${chunkId}...`);
 
+      // Check battery level before sending each chunk
+      const wasStopped = await checkBatteryAndAutoStop();
+      if (wasStopped) {
+        addLog(`🛑 Session stopped due to low battery before sending chunk ${chunkId}`);
+        return;
+      }
+
       const base64Data = await RNFS.readFile(filePath, 'base64');
 
       if (!base64Data || base64Data.length === 0) {
@@ -902,6 +980,13 @@ export function TestingContainer() {
     await sendAudioFile(currentRecording.uri, chunkIdRef.current, Number(sid));
 
     sendIntervalRef.current = setInterval(async () => {
+      // Check battery before each interval
+      const wasStopped = await checkBatteryAndAutoStop();
+      if (wasStopped) {
+        addLog(`🛑 Session stopped due to low battery during interval`);
+        return;
+      }
+      
       chunkIdRef.current += 1;
       
       await sendAudioFile(
@@ -915,23 +1000,22 @@ export function TestingContainer() {
   };
 
   const stopSending = async () => {
+    addLog('🛑 Stopping session...');
     setIsRunning(false);
 
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
+      addLog('⏱️ Elapsed time interval cleared');
     }
 
     if (sendIntervalRef.current) {
       clearInterval(sendIntervalRef.current);
       sendIntervalRef.current = null;
+      addLog('📤 Send interval cleared');
     }
 
-    if (sessionId) {
-      await endSession(sessionId);
-    }
-
-    // Also end the current active session if it exists
+    // End the current active session if it exists
     if (currentSession && currentSession.isActive) {
       const stopBattery = await updateBatteryLevel();
       dispatch(
@@ -940,33 +1024,43 @@ export function TestingContainer() {
           stopBattery,
         }),
       );
-      addLog(`Session ${currentSession.id} ended when stopping`);
+      addLog(`✅ Session ${currentSession.id} marked as inactive (Battery: ${stopBattery}%)`);
+    }
+
+    // Also end session by ID if it exists
+    if (sessionId) {
+      await endSession(sessionId);
     }
 
     setSessionId(null);
     chunkIdRef.current = 1;
-    addLog('Stopped sending chunks');
+    setElapsedMs(0);
+    setSentCount(0);
+    addLog('✅ Session completely stopped');
   };
 
   // Update session timing in real-time
   useEffect(() => {
-    if (currentSession && currentSession.isActive) {
+    if (currentSession && currentSession.isActive && isRunning) {
       const timer = setInterval(() => {
-        const now = Date.now();
-        const totalDuration = now - currentSession.startTime;
-        const totalTiming = formatHMS(totalDuration);
-        const lastChunkSendTime = now;
-        const updatedSession: SessionData = {
-          ...currentSession,
-          totalTiming,
-          lastChunkSendTime,
-        };
-        dispatch(transcriptionActions.updateSession(updatedSession));
+        // Double-check session is still active and running
+        if (currentSession && currentSession.isActive && isRunning) {
+          const now = Date.now();
+          const totalDuration = now - currentSession.startTime;
+          const totalTiming = formatHMS(totalDuration);
+          const lastChunkSendTime = now;
+          const updatedSession: SessionData = {
+            ...currentSession,
+            totalTiming,
+            lastChunkSendTime,
+          };
+          dispatch(transcriptionActions.updateSession(updatedSession));
+        }
       }, 1000);
 
       return () => clearInterval(timer);
     }
-  }, [currentSession, dispatch]);
+  }, [currentSession, dispatch, isRunning]);
 
   // Clean up intervals on unmount
   useEffect(() => {
@@ -1009,6 +1103,28 @@ export function TestingContainer() {
             if (currentBatteryLevel !== null && Math.abs(currentLevel - currentBatteryLevel) > 2) {
               addLog(`🔋 Periodic refresh detected change: ${currentBatteryLevel}% → ${currentLevel}%`);
             }
+            
+            // Check for auto-stop during active sessions
+            if (isRunning && currentLevel <= batteryThreshold) {
+              addLog(`🔋⚠️ Periodic check detected low battery: ${currentLevel}%`);
+              await checkBatteryAndAutoStop();
+            }
+            
+            // Also check for any active sessions even if not currently running
+            const activeSessions = sessions.filter(s => s.isActive);
+            if (activeSessions.length > 0 && currentLevel <= batteryThreshold) {
+              addLog(`🔋⚠️ Periodic check: Ending all ${activeSessions.length} active sessions due to low battery`);
+              for (const session of activeSessions) {
+                const stopBattery = await updateBatteryLevel();
+                dispatch(
+                  transcriptionActions.endSession({
+                    sessionId: session.id,
+                    stopBattery,
+                  }),
+                );
+                addLog(`✅ Session ${session.id} ended due to low battery (${stopBattery}%)`);
+              }
+            }
           } catch (error) {
             addLog(`⚠️ Periodic battery refresh failed: ${String(error)}`);
           }
@@ -1033,7 +1149,7 @@ export function TestingContainer() {
         addLog('🧹 Periodic battery refresh cleaned up');
       }
     };
-  }, [currentBatteryLevel]);
+  }, [currentBatteryLevel, isRunning, batteryThreshold, sessions, dispatch]);
 
   // Render item for session list
   const renderSessionItem = ({item}: {item: SessionData}) => (
@@ -1163,8 +1279,61 @@ export function TestingContainer() {
         <Text style={{fontSize: 16, color: '#333', marginBottom: 5}}>
           🔋 Current Battery: {currentBatteryLevel !== null ? `${currentBatteryLevel}%` : 'Loading...'}
         </Text>
+        <Text style={{fontSize: 14, color: '#333', marginBottom: 5}}>
+          ⚠️ Auto-stop threshold: {batteryThreshold}%
+        </Text>
         <Text style={{fontSize: 12, color: '#666', fontStyle: 'italic'}}>
           Updates with each chunk + system broadcasts + periodic refresh every 30s
+        </Text>
+      </View>
+
+      {/* Battery Threshold Configuration */}
+      <View
+        style={{
+          backgroundColor: '#fff3cd',
+          padding: 15,
+          borderRadius: 8,
+          marginBottom: 20,
+          borderWidth: 1,
+          borderColor: '#ffeaa7',
+        }}>
+        <Text style={{fontSize: 16, color: '#333', marginBottom: 10, fontWeight: 'bold'}}>
+          🔋 Battery Auto-Stop Settings
+        </Text>
+        <View style={{flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'}}>
+          <Text style={{fontSize: 14, color: '#333', flex: 1}}>
+            Stop sending when battery reaches:
+          </Text>
+          <View style={{flexDirection: 'row', alignItems: 'center'}}>
+            <TouchableOpacity
+              style={{
+                backgroundColor: '#6c757d',
+                paddingHorizontal: 8,
+                paddingVertical: 4,
+                borderRadius: 4,
+                marginRight: 5,
+              }}
+              onPress={() => setBatteryThreshold(Math.max(1, batteryThreshold - 1))}>
+              <Text style={{color: 'white', fontSize: 12}}>-</Text>
+            </TouchableOpacity>
+            <Text style={{fontSize: 16, color: '#333', marginHorizontal: 10, minWidth: 30, textAlign: 'center'}}>
+              {batteryThreshold}%
+            </Text>
+            <TouchableOpacity
+              style={{
+                backgroundColor: '#6c757d',
+                paddingHorizontal: 8,
+                paddingVertical: 4,
+                borderRadius: 4,
+                marginLeft: 5,
+              }}
+              onPress={() => setBatteryThreshold(Math.min(100, batteryThreshold + 1))}>
+              <Text style={{color: 'white', fontSize: 12}}>+</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+        <Text style={{fontSize: 12, color: '#666', marginTop: 5, fontStyle: 'italic'}}>
+          Session will automatically stop when battery drops to {batteryThreshold}% or below
         </Text>
       </View>
 
