@@ -915,6 +915,51 @@ export function TestingContainer() {
         const currentBattery = await updateBatteryLevel();
         addLog(`🔋 Final battery level for chunk ${chunkId}: ${currentBattery}%`);
         
+        // Check if battery is below threshold and stop session if needed
+        if (currentBattery <= batteryThreshold) {
+          addLog(`🔋⚠️ Battery level critical in finally block: ${currentBattery}% (threshold: ${batteryThreshold}%)`);
+          addLog(`🛑 Auto-stopping session due to low battery in finally block`);
+          
+          // Immediately stop all running states
+          setIsRunning(false);
+          
+          // Clear all intervals immediately
+          if (intervalRef.current) {
+            clearInterval(intervalRef.current);
+            intervalRef.current = null;
+          }
+          if (sendIntervalRef.current) {
+            clearInterval(sendIntervalRef.current);
+            sendIntervalRef.current = null;
+          }
+          
+          // Stop the session and mark as inactive
+          await stopSending();
+          
+          // End ALL active sessions due to low battery
+          const activeSessions = sessions.filter(s => s.isActive);
+          if (activeSessions.length > 0) {
+            addLog(`🔋⚠️ Ending all ${activeSessions.length} active sessions due to low battery in finally block`);
+            for (const session of activeSessions) {
+              const stopBattery = await updateBatteryLevel();
+              dispatch(
+                transcriptionActions.endSession({
+                  sessionId: session.id,
+                  stopBattery,
+                }),
+              );
+              addLog(`✅ Session ${session.id} ended due to low battery in finally block (${stopBattery}%)`);
+            }
+          }
+          
+          // Force update to ensure UI reflects the stopped state
+          setElapsedMs(0);
+          setSentCount(0);
+          
+          addLog(`🛑 All sessions stopped due to low battery in finally block`);
+          return; // Exit early since session is stopped
+        }
+        
         const now = Date.now();
         
         // Update session with final battery level and chunk status
