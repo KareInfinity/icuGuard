@@ -797,6 +797,23 @@ export function TestingContainer() {
         return null;
       }
 
+      // Double-check that no active sessions exist before creating new one
+      const activeSessions = sessions.filter(s => s.isActive);
+      if (activeSessions.length > 0) {
+        addLog(`⚠️ Warning: ${activeSessions.length} active session(s) still exist, this should have been handled before initSession`);
+        // Force end them as a safety measure
+        for (const session of activeSessions) {
+          const stopBattery = await updateBatteryLevel();
+          dispatch(
+            transcriptionActions.endSession({
+              sessionId: session.id,
+              stopBattery,
+            }),
+          );
+          addLog(`🔧 Safety cleanup: Session ${session.id} ended (Battery: ${stopBattery}%)`);
+        }
+      }
+
       addLog('Initializing session...');
       const startBattery = await updateBatteryLevel();
 
@@ -1005,6 +1022,39 @@ export function TestingContainer() {
       return;
     }
 
+    // First, check if there are any active sessions and end them
+    const activeSessions = sessions.filter(s => s.isActive);
+    if (activeSessions.length > 0) {
+      addLog(`🔄 Found ${activeSessions.length} active session(s), ending them before starting new session...`);
+      
+      for (const session of activeSessions) {
+        const stopBattery = await updateBatteryLevel();
+        dispatch(
+          transcriptionActions.endSession({
+            sessionId: session.id,
+            stopBattery,
+          }),
+        );
+        addLog(`✅ Previous session ${session.id} ended (Battery: ${stopBattery}%)`);
+      }
+      
+      // Also stop any running intervals from previous sessions
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      if (sendIntervalRef.current) {
+        clearInterval(sendIntervalRef.current);
+        sendIntervalRef.current = null;
+      }
+      
+      // Reset running state
+      setIsRunning(false);
+      setElapsedMs(0);
+      setSentCount(0);
+      chunkIdRef.current = 1;
+    }
+
     await updateBatteryLevel();
     const initResult = await initSession();
     if (!initResult) return;
@@ -1060,16 +1110,21 @@ export function TestingContainer() {
       addLog('📤 Send interval cleared');
     }
 
-    // End the current active session if it exists
-    if (currentSession && currentSession.isActive) {
-      const stopBattery = await updateBatteryLevel();
-      dispatch(
-        transcriptionActions.endSession({
-          sessionId: currentSession.id,
-          stopBattery,
-        }),
-      );
-      addLog(`✅ Session ${currentSession.id} marked as inactive (Battery: ${stopBattery}%)`);
+    // End ALL active sessions to ensure only one session is active at a time
+    const activeSessions = sessions.filter(s => s.isActive);
+    if (activeSessions.length > 0) {
+      addLog(`🛑 Ending all ${activeSessions.length} active session(s)...`);
+      
+      for (const session of activeSessions) {
+        const stopBattery = await updateBatteryLevel();
+        dispatch(
+          transcriptionActions.endSession({
+            sessionId: session.id,
+            stopBattery,
+          }),
+        );
+        addLog(`✅ Session ${session.id} marked as inactive (Battery: ${stopBattery}%)`);
+      }
     }
 
     // Also end session by ID if it exists
@@ -1081,7 +1136,7 @@ export function TestingContainer() {
     chunkIdRef.current = 1;
     setElapsedMs(0);
     setSentCount(0);
-    addLog('✅ Session completely stopped');
+    addLog('✅ All sessions completely stopped');
   };
 
   // Update session timing in real-time
@@ -1463,14 +1518,14 @@ export function TestingContainer() {
                 isRunning ? stopSending : () => startSessionWithInterval()
               }>
               <Text style={{color: 'white', fontSize: 16, fontWeight: 'bold'}}>
-                {isRunning ? '⏹️ Stop Sending' : '▶️ Start Sending'}
+                {isRunning ? '⏹️ Stop Sending' : '▶️ Start New Session'}
               </Text>
             </TouchableOpacity>
           </View>
         </View>
       )}
 
-      {/* Recording Status */}
+      {/* Session Status */}
       <View
         style={{
           backgroundColor: '#f8f9fa',
@@ -1488,6 +1543,14 @@ export function TestingContainer() {
           <Text style={{fontSize: 16, color: '#333', marginBottom: 5}}>
             Selected: {currentRecording.name} (
             {formatHMS(currentRecording.duration)})
+          </Text>
+        )}
+        <Text style={{fontSize: 14, color: '#666', marginTop: 5}}>
+          {isRunning ? '🟢 Session Active' : '🔴 No Active Session'}
+        </Text>
+        {activeSession && (
+          <Text style={{fontSize: 12, color: '#888', marginTop: 2}}>
+            Session ID: {activeSession.id} | Chunks: {activeSession.chunksSent}
           </Text>
         )}
       </View>
