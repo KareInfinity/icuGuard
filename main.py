@@ -1419,7 +1419,17 @@ async def websocket_endpoint(websocket: WebSocket):
                 audio_bytes = base64.b64decode(message["data"])
                 audio_size = len(audio_bytes)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
+                
+                # Extract ICU data from message
+                icu_data = {
+                    "patient": message.get("patient"),
+                    "ward": message.get("ward"), 
+                    "user": message.get("user"),
+                    "username": message.get("username", username)
+                }
+                
                 logger.info(f"[SESSION {session_id}] AUDIO CHUNK {chunk_counter} RECEIVED - Size: {audio_size} bytes, Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                logger.info(f"[SESSION {session_id}] ICU DATA - Patient: {icu_data['patient']['name'] if icu_data['patient'] else 'None'}, Ward: {icu_data['ward']['desc'] if icu_data['ward'] else 'None'}, User: {icu_data['user']['loginname'] if icu_data['user'] else 'None'}")
 
                 # Save audio chunk to file immediately with safe path handling
                 chunk_filename = f"chunk_{chunk_counter}_{timestamp}.wav"
@@ -1454,8 +1464,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     # Small delay to ensure file is fully written before processing
                     await asyncio.sleep(0.5)
                     
-                    # Add to processing queue (background processing)
-                    audio_processor.add_chunk_to_queue(session_id, chunk_filepath, chunk_counter)
+                    # Add to processing queue (background processing) with ICU data
+                    audio_processor.add_chunk_to_queue(session_id, chunk_filepath, chunk_counter, icu_data)
                     
                 except Exception as save_error:
                     logger.error(f"[SESSION {session_id}] FAILED TO SAVE AUDIO CHUNK {chunk_counter}: {str(save_error)}")
@@ -1577,8 +1587,8 @@ class AudioProcessor:
             }
             logger.info(f"[PROCESSOR] Registered session {session_id} for user {username} - Total active sessions: {len(self.sessions)}")
     
-    def add_chunk_to_queue(self, session_id: str, chunk_filepath: str, chunk_number: int):
-        """Add a chunk to the processing queue with size limits"""
+    def add_chunk_to_queue(self, session_id: str, chunk_filepath: str, chunk_number: int, icu_data: dict = None):
+        """Add a chunk to the processing queue with size limits and ICU data"""
         # Check queue size limit
         with self.queue_lock:
             if len(self.processing_queue) >= self.max_queue_size:
@@ -1631,6 +1641,7 @@ class AudioProcessor:
                 'session_count': session_count,
                 'filepath': chunk_filepath,
                 'chunk_number': chunk_number,
+                'icu_data': icu_data,
                 'timestamp': datetime.now()
             })
             
@@ -1697,6 +1708,7 @@ class AudioProcessor:
             session_count = chunk_info.get('session_count', 1)
             filepath = chunk_info['filepath']
             chunk_number = chunk_info['chunk_number']
+            icu_data = chunk_info.get('icu_data', {})
         
         # Check if file still exists before processing
         if not os.path.exists(filepath):
@@ -1734,7 +1746,13 @@ class AudioProcessor:
                 return
         
         try:
-            logger.info(f"[PROCESSOR] Processing chunk {chunk_number} for session {session_id} abbb {filepath}")
+            # Log ICU context for this chunk
+            patient_name = icu_data.get('patient', {}).get('name', 'Unknown') if icu_data.get('patient') else 'Unknown'
+            ward_name = icu_data.get('ward', {}).get('desc', 'Unknown') if icu_data.get('ward') else 'Unknown'
+            user_name = icu_data.get('user', {}).get('loginname', 'Unknown') if icu_data.get('user') else 'Unknown'
+            
+            logger.info(f"[PROCESSOR] Processing chunk {chunk_number} for session {session_id} - Patient: {patient_name}, Ward: {ward_name}, User: {user_name}")
+            logger.info(f"[PROCESSOR] File: {filepath}")
 
             
             filepath = os.path.abspath(filepath)
@@ -1751,7 +1769,7 @@ class AudioProcessor:
             # transcription_text = result["text"].strip()
             
             if transcription_text:  # Only process if there's actual text
-                # Create output data
+                # Create output data with ICU context
                 output_data = {
                     "session_id": session_id,
                     "chunk": chunk_number,
@@ -1759,14 +1777,20 @@ class AudioProcessor:
                     "text": transcription_text,
                     "confidence": result.get("confidence", 0.0),
                     "language": result.get("language", "en"),
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "icu_context": {
+                        "patient": icu_data.get('patient'),
+                        "ward": icu_data.get('ward'),
+                        "user": icu_data.get('user'),
+                        "username": icu_data.get('username', username)
+                    }
                 }
                 
                 # Save transcription to file
                 self._save_transcription_output(session_id, chunk_number, output_data, username, session_count)
                 
-                # Send message directly to websocket
-                self._send_websocket_message_immediate(session_id, chunk_number, transcription_text, result)
+                # Send message directly to websocket with ICU context
+                self._send_websocket_message_immediate(session_id, chunk_number, transcription_text, result, icu_data)
                 
                 logger.info(f"[PROCESSOR] Chunk {chunk_number} processed - Text: '{transcription_text}'")
             else:
@@ -1853,10 +1877,21 @@ class AudioProcessor:
             if username == "unknown":
                 logger.warning(f"[BACKGROUND] Username is 'unknown' for session {session_id}, transcription file may have incorrect name")
             
-            # Create descriptive filename: {session_count}_{username}_{date}_{time}.txt
+            # Create descriptive filename with ICU context: {session_count}_{username}_{patient}_{ward}_{date}_{time}.txt
             date_str = datetime.now().strftime('%Y%m%d')
             time_str = datetime.now().strftime('%H%M%S')
-            session_txt_filename = f"{session_count}_{username}_{date_str}_{time_str}.txt"
+            
+            # Extract ICU context for filename
+            patient_name = "Unknown"
+            ward_name = "Unknown"
+            if output_data.get('icu_context'):
+                patient_name = output_data['icu_context'].get('patient', {}).get('name', 'Unknown') if output_data['icu_context'].get('patient') else 'Unknown'
+                ward_name = output_data['icu_context'].get('ward', {}).get('desc', 'Unknown') if output_data['icu_context'].get('ward') else 'Unknown'
+                # Clean names for filename
+                patient_name = re.sub(r'[^\w\-_. ]', '_', patient_name)[:20]  # Limit length and clean
+                ward_name = re.sub(r'[^\w\-_. ]', '_', ward_name)[:20]  # Limit length and clean
+            
+            session_txt_filename = f"{session_count}_{username}_{patient_name}_{ward_name}_{date_str}_{time_str}.txt"
             session_txt_filepath = os.path.join(transcriptions_dir, session_txt_filename)
             
             # Log the filename being created for debugging
@@ -1874,8 +1909,8 @@ class AudioProcessor:
         except Exception as e:
             logger.error(f"[BACKGROUND] Error saving output: {str(e)}")
     
-    def _send_websocket_message_immediate(self, session_id: str, chunk_number: int, transcription_text: str, result):
-        """Send transcription result to websocket immediately"""
+    def _send_websocket_message_immediate(self, session_id: str, chunk_number: int, transcription_text: str, result, icu_data: dict = None):
+        """Send transcription result to websocket immediately with ICU context"""
         with self.session_lock:
             if session_id not in self.sessions:
                 logger.warning(f"[PROCESSOR] Session {session_id} not found in sessions")
@@ -1895,7 +1930,13 @@ class AudioProcessor:
                     "text": transcription_text,
                     "confidence": result.get("confidence", 0.0),
                     "language": result.get("language", "en"),
-                    "timestamp": int(datetime.now().timestamp() * 1000)  # Unix timestamp in milliseconds
+                    "timestamp": int(datetime.now().timestamp() * 1000),  # Unix timestamp in milliseconds
+                    "icu_context": {
+                        "patient": icu_data.get('patient') if icu_data else None,
+                        "ward": icu_data.get('ward') if icu_data else None,
+                        "user": icu_data.get('user') if icu_data else None,
+                        "username": icu_data.get('username') if icu_data else None
+                    }
                 }
                 
                 # Store the message to be sent by the main WebSocket handler

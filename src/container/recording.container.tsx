@@ -564,11 +564,47 @@ export function RecordingContainer(props: RecordingContainerProps) {
           'characters',
         );
 
-        // Send audio data
+        // Send audio data with selected ICU information
         const audioMessage = {
           type: 'audio',
           data: fullAudioData.current,
           language: 'en',
+          // Include selected ICU data
+          patient: selectedPatient ? {
+            patientid: selectedPatient.patientid,
+            name: selectedPatient.name,
+            bed: selectedPatient.bed,
+            room: selectedPatient.room,
+            ward: selectedPatient.ward,
+            age: selectedPatient.age,
+            gender: selectedPatient.gender,
+            diagnosis: selectedPatient.diagnosis,
+            admission: selectedPatient.admission,
+            hr: selectedPatient.hr,
+            sp02: selectedPatient.sp02,
+            bp: selectedPatient.bp,
+            weight: selectedPatient.weight,
+            nhino: selectedPatient.nhino,
+            dischargedate: selectedPatient.dischargedate,
+            ic: selectedPatient.ic,
+            drname: selectedPatient.drname
+          } : null,
+          ward: selectedWard ? {
+            unitid: selectedWard.unitid,
+            desc: selectedWard.desc,
+            code: selectedWard.code,
+            capacity: selectedWard.capacity
+          } : null,
+          user: selectedUser ? {
+            userid: selectedUser.userid,
+            loginname: selectedUser.loginname,
+            groupname: selectedUser.groupname,
+            rights: selectedUser.rights,
+            status: selectedUser.status,
+            wards: selectedUser.wards
+          } : null,
+          // Include username for session tracking
+          username: username || 'unknown'
         };
 
         wsRef.current.send(JSON.stringify(audioMessage));
