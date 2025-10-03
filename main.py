@@ -1,7 +1,5 @@
 import os
 import re
-from typing import Optional
-from fastapi.responses import JSONResponse
 import psutil
 # Force CPU-only mode for faster-whisper
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -28,6 +26,17 @@ from collections import defaultdict
 import torch
 import soundfile as sf
 import librosa
+
+# ICU Care Lite imports
+import requests
+import urllib3
+import xml.etree.ElementTree as ET
+import ssl
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
+
+# Disable SSL warnings for ICU Care Lite
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Utility functions
 def sanitize_filename(filename):
@@ -359,55 +368,6 @@ async def cleanup_old_background_tasks():
     
     return {"message": f"Cleaned up {deleted_count} old background tasks"}
 
-@app.post("/transcribe/simple")
-async def transcribe_simple(
-    audio: UploadFile = File(...),
-    language: str = Form("en")
-):
-    """
-    Simple synchronous audio transcription endpoint
-    
-    Args:
-        audio: Audio file to transcribe (wav, mp3, etc.)
-        language: Language code (default: "en")
-    
-    Returns:
-        JSON with transcription text immediately
-    """
-    try:
-        logger.info(f"Simple transcribe request: {audio.filename} ({audio.content_type})")
-        
-        # Read audio file
-        audio_bytes = await audio.read()
-        file_size_mb = len(audio_bytes) / (1024 * 1024)
-        logger.info(f"Audio file size: {file_size_mb:.2f} MB")
-        
-        # Process immediately (synchronous)
-        result = transcribe_audio_bytes(audio_bytes)
-        
-        # Return simple response with just the text
-        response = {
-            "success": True,
-            "text": result.get("text", ""),
-            "language": result.get("language", "en"),
-            "confidence": result.get("confidence", 0.0),
-            "filename": audio.filename,
-            "file_size_mb": file_size_mb,
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        logger.info(f"Simple transcription completed for {audio.filename}: '{result.get('text', '')[:100]}'")
-        return response
-        
-    except Exception as e:
-        logger.error(f"Error in simple transcription: {str(e)}")
-        return {
-            "success": False,
-            "error": str(e),
-            "text": "",
-            "timestamp": datetime.now().isoformat()
-        }
-
 @app.post("/transcribe/audio-base64")
 async def transcribe_audio_base64(
     audio_data: str = Form(...),
@@ -461,6 +421,183 @@ async def transcribe_audio_base64(
     except Exception as e:
         logger.error(f"Error transcribing base64 audio: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+# ICU Care Lite API Endpoints
+@app.post("/icu/login")
+async def icu_login(
+    username: str = Form("tony"),
+    password: str = Form("icu@123"),
+    code: str = Form("")
+):
+    """
+    Login to ICU Care Lite system and get JWT token
+    
+    Args:
+        username: ICU Care Lite username (default: "tony")
+        password: ICU Care Lite password (default: "icu@123")
+        code: Additional code if required (default: "")
+    
+    Returns:
+        JSON with login status and JWT token
+    """
+    try:
+        logger.info(f"ICU Care Lite login request for user: {username}")
+        
+        # Create ICU client instance
+        icu_client = ICUCareLiteClient()
+        
+        # Attempt login
+        login_success = icu_client.login(username, password, code)
+        
+        if login_success:
+            return {
+                "success": True,
+                "message": "ICU Care Lite login successful",
+                "username": username,
+                "jwt_token": icu_client.jwt_token,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            return {
+                "success": False,
+                "message": "ICU Care Lite login failed",
+                "username": username,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+    except Exception as e:
+        logger.error(f"ICU Care Lite login error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"ICU Care Lite login failed: {str(e)}")
+
+@app.post("/icu/patient-list")
+async def icu_get_patient_list(
+    username: str = Form("tony"),
+    password: str = Form("icu@123"),
+    code: str = Form(""),
+    shift_start: str = Form("2025-09-26 14:00"),
+    shift_end: str = Form("2025-09-26 22:00")
+):
+    """
+    Get ICU Care Lite patient list with wards and users
+    
+    Args:
+        username: ICU Care Lite username (default: "tony")
+        password: ICU Care Lite password (default: "icu@123")
+        code: Additional code if required (default: "")
+        shift_start: Shift start datetime (default: "2025-09-26 14:00")
+        shift_end: Shift end datetime (default: "2025-09-26 22:00")
+    
+    Returns:
+        JSON with patient list, ward list, and user list
+    """
+    try:
+        logger.info(f"ICU Care Lite patient list request for user: {username}")
+        
+        # Create ICU client instance
+        icu_client = ICUCareLiteClient()
+        
+        # Login first
+        login_success = icu_client.login(username, password, code)
+        
+        if not login_success:
+            return {
+                "success": False,
+                "message": "ICU Care Lite login failed",
+                "username": username,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Get patient list
+        patient_data = icu_client.get_patient_list(shift_start, shift_end)
+        
+        if patient_data:
+            return {
+                "success": True,
+                "message": "ICU Care Lite data retrieved successfully",
+                "username": username,
+                "timestamp": patient_data["timestamp"],
+                "summary": patient_data["summary"],
+                "patient_list": patient_data["patients"],
+                "ward_list": patient_data["wards"],
+                "user_list": patient_data["users"],
+                "jwt_token": patient_data["jwt_token"]
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Failed to retrieve ICU Care Lite data",
+                "username": username,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+    except Exception as e:
+        logger.error(f"ICU Care Lite patient list error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"ICU Care Lite patient list failed: {str(e)}")
+
+@app.get("/icu/patient-list")
+async def icu_get_patient_list_get(
+    username: str = "tony",
+    password: str = "icu@123",
+    code: str = "",
+    shift_start: str = "2025-09-26 14:00",
+    shift_end: str = "2025-09-26 22:00"
+):
+    """
+    Get ICU Care Lite patient list with wards and users (GET method)
+    
+    Args:
+        username: ICU Care Lite username (default: "tony")
+        password: ICU Care Lite password (default: "icu@123")
+        code: Additional code if required (default: "")
+        shift_start: Shift start datetime (default: "2025-09-26 14:00")
+        shift_end: Shift end datetime (default: "2025-09-26 22:00")
+    
+    Returns:
+        JSON with patient list, ward list, and user list
+    """
+    try:
+        logger.info(f"ICU Care Lite patient list GET request for user: {username}")
+        
+        # Create ICU client instance
+        icu_client = ICUCareLiteClient()
+        
+        # Login first
+        login_success = icu_client.login(username, password, code)
+        
+        if not login_success:
+            return {
+                "success": False,
+                "message": "ICU Care Lite login failed",
+                "username": username,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Get patient list
+        patient_data = icu_client.get_patient_list(shift_start, shift_end)
+        
+        if patient_data:
+            return {
+                "success": True,
+                "message": "ICU Care Lite data retrieved successfully",
+                "username": username,
+                "timestamp": patient_data["timestamp"],
+                "summary": patient_data["summary"],
+                "patient_list": patient_data["patients"],
+                "ward_list": patient_data["wards"],
+                "user_list": patient_data["users"],
+                "jwt_token": patient_data["jwt_token"]
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Failed to retrieve ICU Care Lite data",
+                "username": username,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+    except Exception as e:
+        logger.error(f"ICU Care Lite patient list error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"ICU Care Lite patient list failed: {str(e)}")
 
 @app.get("/health")
 async def health_check():
@@ -1892,6 +2029,223 @@ class AudioProcessor:
             except ValueError:
                 pass
 
+# ICU Care Lite Client Class
+class ICUCareLiteClient:
+    def __init__(self, base_url="https://icucarelite_demo.aixelink.com:88"):
+        self.base_url = base_url
+        self.session = None
+        self.jwt_token = None
+        self.setup_session()
+    
+    def setup_session(self):
+        """Setup session with SSL bypass"""
+        self.session = requests.Session()
+        self.session.verify = False
+        
+        # SSL bypass for demo server
+        class SSLAdapter(HTTPAdapter):
+            def init_poolmanager(self, *args, **kwargs):
+                context = create_urllib3_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                kwargs['ssl_context'] = context
+                return super().init_poolmanager(*args, **kwargs)
+        
+        self.session.mount('https://', SSLAdapter())
+    
+    def login(self, username="tony", password="icu@123", code=""):
+        """Login to ICU system and get JWT token"""
+        logger.info(f"ICU Care Lite Login attempt for user: {username}")
+        
+        login_url = f"{self.base_url}/api/users/login"
+        
+        headers = {
+            "Cache-Control": "no-cache",
+            "Content-Type": "application/json",
+            "Referer": f"{self.base_url}/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+        }
+        
+        login_data = {
+            "username": username,
+            "password": password,
+            "code": code
+        }
+        
+        try:
+            response = self.session.post(login_url, json=login_data, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                response_data = response.json()
+                
+                if 'data' in response_data and 'accessToken' in response_data['data']:
+                    self.jwt_token = response_data['data']['accessToken']
+                    logger.info(f"ICU Care Lite login successful for user: {username}")
+                    return True
+                else:
+                    logger.error("No access token in ICU Care Lite response")
+                    return False
+            else:
+                logger.error(f"ICU Care Lite login failed with status {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"ICU Care Lite login error: {e}")
+            return False
+    
+    def get_patient_list(self, shift_start="2025-09-26 14:00", shift_end="2025-09-26 22:00"):
+        """Get patient list using JWT token"""
+        if not self.jwt_token:
+            logger.error("No JWT token available for ICU Care Lite. Please login first.")
+            return None
+        
+        logger.info("ICU Care Lite - Getting patient list")
+        
+        api_url = f"{self.base_url}/api/dataplus"
+        
+        headers = {
+            "Cache-Control": "no-cache",
+            "Content-Type": "application/xml",
+            "Referer": f"{self.base_url}/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+        }
+        
+        # XML request body
+        xml_body = f"""<bd OrgUnitID="" ShiftStartDateTime="{shift_start}" ShiftEndDateTime="{shift_end}" jwt="{self.jwt_token}">
+<wards>
+    <ward conceptID="preceptward">
+        <unitid conceptID="unitid"/>
+        <desc conceptID="unitdescription"/>
+        <code conceptID="unitcode"/>
+        <capacity conceptID="unitcapacity"/>
+    </ward>
+</wards>
+
+<securityrights conceptID="securityrights">
+    <userid conceptID="userid"/>
+    <loginname conceptID="loginname"/>
+    <groupname conceptID="groupname"/>
+    <rights conceptID="rights"/>
+    <status conceptID="status"/>
+    <wards conceptID="wards"/>
+</securityrights>
+
+<whiteboard>
+    <entry conceptID="loadcurrentpatients">
+        <patientid conceptID="patientid"/>
+        <eventid conceptID="eventid"/>
+        <name conceptID="name"/>
+        <bed conceptID="bed"/>
+        <bedid conceptID="bedid"/>
+        <room conceptID="room"/>
+        <ward conceptID="ward"/>
+        <wardid conceptID="wardid"/>
+        <hr conceptID="hr"/>
+        <bo conceptID="sp02"/>
+        <bp conceptID="bp"/>
+        <adm conceptID="admission"/>
+        <age conceptID="age"/>
+        <gen conceptID="gender"/>
+        <weight conceptID="weight"/>
+        <diagnosis conceptID="diagnosis" />
+        <nhino conceptID="nhino"/>
+        <dischargedate conceptID="dischargedate"/>
+        <ic conceptID="ic"/>
+        <drname conceptID="drname"/>
+    </entry>
+</whiteboard>
+</bd>"""
+        
+        try:
+            response = self.session.post(api_url, data=xml_body, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                return self.parse_patient_data(response.text)
+            else:
+                logger.error(f"ICU Care Lite patient list request failed: {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"ICU Care Lite patient list error: {e}")
+            return None
+    
+    def parse_patient_data(self, xml_response):
+        """Parse XML response and extract patient data"""
+        try:
+            root = ET.fromstring(xml_response)
+            
+            # Extract data
+            wards = root.findall(".//ward")
+            users = root.findall(".//securityrights")
+            patients = root.findall(".//entry")
+            
+            logger.info(f"ICU Care Lite data retrieved - Wards: {len(wards)}, Users: {len(users)}, Patients: {len(patients)}")
+            
+            # Create structured data
+            data = {
+                "timestamp": datetime.now().isoformat(),
+                "jwt_token": self.jwt_token,
+                "summary": {
+                    "total_wards": len(wards),
+                    "total_users": len(users),
+                    "total_patients": len(patients)
+                },
+                "wards": [],
+                "users": [],
+                "patients": []
+            }
+            
+            # Extract wards
+            for ward in wards:
+                data["wards"].append({
+                    "unitid": ward.findtext("unitid", ""),
+                    "desc": ward.findtext("desc", ""),
+                    "code": ward.findtext("code", ""),
+                    "capacity": ward.findtext("capacity", "")
+                })
+            
+            # Extract users
+            for user in users:
+                data["users"].append({
+                    "userid": user.findtext("userid", ""),
+                    "loginname": user.findtext("loginname", ""),
+                    "groupname": user.findtext("groupname", ""),
+                    "rights": user.findtext("rights", ""),
+                    "status": user.findtext("status", ""),
+                    "wards": user.findtext("wards", "")
+                })
+            
+            # Extract patients
+            for patient in patients:
+                data["patients"].append({
+                    "patientid": patient.findtext("patientid", ""),
+                    "eventid": patient.findtext("eventid", ""),
+                    "name": patient.findtext("name", ""),
+                    "bed": patient.findtext("bed", ""),
+                    "bedid": patient.findtext("bedid", ""),
+                    "room": patient.findtext("room", ""),
+                    "ward": patient.findtext("ward", ""),
+                    "wardid": patient.findtext("wardid", ""),
+                    "hr": patient.findtext("hr", ""),
+                    "sp02": patient.findtext("bo", ""),
+                    "bp": patient.findtext("bp", ""),
+                    "admission": patient.findtext("adm", ""),
+                    "age": patient.findtext("age", ""),
+                    "gender": patient.findtext("gen", ""),
+                    "weight": patient.findtext("weight", ""),
+                    "diagnosis": patient.findtext("diagnosis", ""),
+                    "nhino": patient.findtext("nhino", ""),
+                    "dischargedate": patient.findtext("dischargedate", ""),
+                    "ic": patient.findtext("ic", ""),
+                    "drname": patient.findtext("drname", "")
+                })
+            
+            return data
+            
+        except ET.ParseError as e:
+            logger.error(f"ICU Care Lite XML parsing error: {e}")
+            return None
+
 # Configuration
 ENABLE_AUTO_CLEANUP = False  # Set to False to disable automatic cleanup for debugging
 
@@ -2020,109 +2374,12 @@ async def ui_websocket_endpoint(websocket: WebSocket):
             pass
         logger.info(f"UI client removed. Total connections: {len(active_connections)}")
 
-
-
-@app.post("/transcribe")
-async def transcribe(
-    type: str = Form(...),  # init, audio, end, get_messages
-    username: Optional[str] = Form(None),
-    session_id: Optional[str] = Form(None),
-    chunk_id: Optional[int] = Form(None),
-    audio: Optional[UploadFile] = File(None)
-):
-    try:
-        # INIT SESSION
-        if type == "init":
-            if not username:
-                return JSONResponse(status_code=400, content={"error": "Missing username"})
-            session_id = str(uuid.uuid4())[:8]
-            session_audio_dir = f"audio/{username}/session_{session_id}"
-            os.makedirs(session_audio_dir, exist_ok=True)
-
-            session_count = get_next_session_count(username)
-            audio_processor.register_session(session_id, session_audio_dir, None, username)
-            audio_processor.update_session_username(session_id, username, session_count)
-
-            return {
-                "type": "initialized",
-                "username": username,
-                "session_id": session_id,
-                "session_count": session_count
-            }
-
-        # UPLOAD AUDIO CHUNK
-        elif type == "audio":
-            if not session_id or not chunk_id or not audio:
-                return JSONResponse(status_code=400, content={"error": "Missing session_id, chunk_id or audio file"})
-
-            session_info = audio_processor.sessions.get(session_id)
-            if not session_info:
-                return JSONResponse(status_code=404, content={"error": "Invalid session_id"})
-
-            session_audio_dir = session_info['dir']
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-            chunk_filename = f"chunk_{chunk_id}_{timestamp}.wav"
-            chunk_filepath = safe_path_join(session_audio_dir, chunk_filename)
-
-            with open(chunk_filepath, 'wb') as out_file:
-                out_file.write(await audio.read())
-                out_file.flush()
-                os.fsync(out_file.fileno())
-
-            audio_processor.add_chunk_to_queue(session_id, chunk_filepath, chunk_id)
-
-            return {
-                "type": "audio_received",
-                "chunk": chunk_id,
-                "filename": chunk_filename
-            }
-
-        # END SESSION
-        elif type == "end":
-            if not session_id:
-                return JSONResponse(status_code=400, content={"error": "Missing session_id"})
-
-            if session_id not in audio_processor.sessions:
-                return JSONResponse(status_code=404, content={"error": "Invalid session_id"})
-
-            audio_processor.mark_session_complete(session_id)
-
-            return {
-                "type": "session_complete",
-                "session_id": session_id
-            }
-
-        # GET MESSAGES
-        elif type == "get_messages":
-            if not session_id:
-                return JSONResponse(status_code=400, content={"error": "Missing session_id"})
-
-            pending_messages = []
-            with audio_processor.session_lock:
-                if session_id in audio_processor.sessions:
-                    session_info = audio_processor.sessions[session_id]
-                    if 'pending_messages' in session_info:
-                        pending_messages = session_info['pending_messages'].copy()
-                        session_info['pending_messages'] = []
-
-            return {
-                "type": "messages",
-                "session_id": session_id,
-                "messages": pending_messages
-            }
-
-        else:
-            return JSONResponse(status_code=400, content={"error": f"Unknown type: {type}"})
-
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
-    
 if __name__ == "__main__":
     import uvicorn
     logger.info("Starting Faster-Whisper Real-time Transcription API server")
     uvicorn.run(
         app, 
-        host="192.168.1.22",  # Listen on all interfaces for server deployment
+        host="192.168.1.16",  # Listen on all interfaces for server deployment
         port=8111,
         timeout_keep_alive=3600,  # 1 hour keep-alive timeout
         timeout_graceful_shutdown=60,  # 1 minute graceful shutdown

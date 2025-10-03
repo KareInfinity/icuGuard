@@ -15,6 +15,8 @@ import {
   ActivityIndicator,
   Animated,
   Image,
+  Modal,
+  FlatList,
 } from 'react-native';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import {BottomTabScreenProps} from '@react-navigation/bottom-tabs';
@@ -23,7 +25,7 @@ import {CompositeScreenProps} from '@react-navigation/native';
 import {HomeModuleParamList, AppModuleParamList} from '../app.navigation';
 import AudioRecord from 'react-native-audio-record';
 import RNFS from 'react-native-fs';
-import {getCustomPlatformWSUrl, DEFAULT_SERVER_URL} from '../utils/serverUtils';
+import {getCustomPlatformWSUrl, getCustomPlatformAPIUrl, DEFAULT_SERVER_URL} from '../utils/serverUtils';
 import {useDispatch, useSelector} from 'react-redux';
 import {
   transcriptionActions,
@@ -36,6 +38,62 @@ import {RootState} from '../redux/store.redux';
 // Import GIF assets
 const auxlinkBlueGif = require('../asserts/auxlink_blue.gif');
 const auxlinkRedGif = require('../asserts/auxlink_red.gif');
+
+// Patient data types
+interface Patient {
+  patientid: string;
+  eventid: string;
+  name: string;
+  bed: string;
+  bedid: string;
+  room: string;
+  ward: string;
+  wardid: string;
+  hr: string;
+  sp02: string;
+  bp: string;
+  admission: string;
+  age: string;
+  gender: string;
+  weight: string;
+  diagnosis: string;
+  nhino: string;
+  dischargedate: string;
+  ic: string;
+  drname: string;
+}
+
+interface Ward {
+  unitid: string;
+  desc: string;
+  code: string;
+  capacity: string;
+}
+
+interface User {
+  userid: string;
+  loginname: string;
+  groupname: string;
+  rights: string;
+  status: string;
+  wards: string;
+}
+
+interface PatientListResponse {
+  success: boolean;
+  message: string;
+  username: string;
+  timestamp: string;
+  summary: {
+    total_wards: number;
+    total_users: number;
+    total_patients: number;
+  };
+  patient_list: Patient[];
+  ward_list: Ward[];
+  user_list: User[];
+  jwt_token: string;
+}
 type RecordingContainerProps = CompositeScreenProps<
   BottomTabScreenProps<HomeModuleParamList, 'recording'>,
   NativeStackScreenProps<AppModuleParamList>
@@ -62,6 +120,15 @@ export function RecordingContainer(props: RecordingContainerProps) {
   const [errorCount, setErrorCount] = useState(0);
   const [wsConnected, setWsConnected] = useState(false);
   const [wsConnecting, setWsConnecting] = useState(false);
+
+  // Patient data state
+  const [patientData, setPatientData] = useState<PatientListResponse | null>(null);
+  const [loadingPatients, setLoadingPatients] = useState(false);
+  const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
+  const [selectedWard, setSelectedWard] = useState<Ward | null>(null);
+  const [selectedUser, setSelectedUser] = useState<User | null>(null);
+  const [activeTab, setActiveTab] = useState<'patients' | 'wards' | 'users'>('patients');
+  const [showIndividualModal, setShowIndividualModal] = useState(false);
 
   // Audio recording state
   const fullAudioData = useRef<string>('');
@@ -219,6 +286,122 @@ export function RecordingContainer(props: RecordingContainerProps) {
   const clearError = () => {
     setLastError(null);
     setErrorCount(0);
+  };
+
+  const loadPatientData = async () => {
+    try {
+      console.log('🏥 Loading patient data from ICU endpoint...');
+      setLoadingPatients(true);
+      clearError();
+
+      const apiUrl = getCustomPlatformAPIUrl(customServerUrl, '/icu/patient-list');
+      
+      // Create query parameters for GET request
+      const params = new URLSearchParams({
+        username: 'tony',
+        password: 'icu@123',
+        code: '',
+        shift_start: '2025-09-26 14:00',
+        shift_end: '2025-09-26 22:00',
+      });
+
+      const fullUrl = `${apiUrl}?${params.toString()}`;
+      console.log('🌐 ICU API URL:', fullUrl);
+      console.log('🔧 Custom Server URL:', customServerUrl);
+      console.log('🔧 Base API URL:', apiUrl);
+      console.log('🔧 Query Params:', params.toString());
+      
+      // Test with hardcoded URL to verify server is reachable
+      const testUrl = 'http://192.168.1.16:8111/icu/patient-list?username=tony&password=icu%40123&code=&shift_start=2025-09-26%2014:00&shift_end=2025-09-26%2022:00';
+      console.log('🧪 Test URL:', testUrl);
+
+      let response = await fetch(fullUrl, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      // If the constructed URL fails, try the hardcoded URL
+      if (!response.ok && response.status === 404) {
+        console.log('🔄 Constructed URL failed, trying hardcoded URL...');
+        response = await fetch(testUrl, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        });
+      }
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data: PatientListResponse = await response.json();
+      console.log('✅ Patient data loaded successfully:', data);
+
+      if (data.success) {
+        setPatientData(data);
+        console.log(`📊 Loaded ${data.summary.total_patients} patients, ${data.summary.total_wards} wards, ${data.summary.total_users} users`);
+        Alert.alert(
+          'Data Loaded Successfully',
+          `Loaded ${data.summary.total_patients} patients, ${data.summary.total_wards} wards, and ${data.summary.total_users} users. You can now select from the options below.`,
+        );
+      } else {
+        throw new Error(data.message || 'Failed to load patient data');
+      }
+    } catch (error) {
+      console.error('❌ Failed to load patient data:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      handleError(errorMessage, 'Patient Data Load Failed');
+      Alert.alert(
+        'Load Failed',
+        `Failed to load patient data: ${errorMessage}`,
+      );
+    } finally {
+      setLoadingPatients(false);
+    }
+  };
+
+  const selectPatient = (patient: Patient) => {
+    setSelectedPatient(patient);
+    console.log('👤 Selected patient:', patient.name);
+    Alert.alert(
+      'Patient Selected',
+      `Selected: ${patient.name}\nBed: ${patient.bed}\nRoom: ${patient.room}\nWard: ${patient.ward}`,
+    );
+  };
+
+  const selectWard = (ward: Ward) => {
+    setSelectedWard(ward);
+    console.log('🏥 Selected ward:', ward.desc);
+    Alert.alert(
+      'Ward Selected',
+      `Selected: ${ward.desc}\nCode: ${ward.code}\nCapacity: ${ward.capacity}`,
+    );
+  };
+
+  const selectUser = (user: User) => {
+    setSelectedUser(user);
+    console.log('👨‍⚕️ Selected user:', user.loginname);
+    Alert.alert(
+      'User Selected',
+      `Selected: ${user.loginname}\nGroup: ${user.groupname}\nStatus: ${user.status}`,
+    );
+  };
+
+
+  const openIndividualModal = (type: 'patients' | 'wards' | 'users') => {
+    if (!patientData) {
+      Alert.alert('No Data', 'Please load ICU data first');
+      return;
+    }
+    setActiveTab(type);
+    setShowIndividualModal(true);
+  };
+
+  const closeIndividualModal = () => {
+    setShowIndividualModal(false);
   };
 
   const sendStoredFullAudio = async () => {
@@ -888,9 +1071,13 @@ export function RecordingContainer(props: RecordingContainerProps) {
 
   return (
     <SafeAreaView style={{flex: 1, backgroundColor: '#f9f9f9'}}>
-      <KeyboardAvoidingView
-        style={{margin: 10, justifyContent: 'center'}}
-        behavior="padding">
+      <ScrollView 
+        style={{flex: 1}}
+        showsVerticalScrollIndicator={true}
+        keyboardShouldPersistTaps="handled">
+        <KeyboardAvoidingView
+          style={{margin: 10, justifyContent: 'center'}}
+          behavior="padding">
         {/* Server Configuration */}
         <View
           style={{
@@ -996,8 +1183,8 @@ export function RecordingContainer(props: RecordingContainerProps) {
      
         </View>
 
-        {/* Test Button */}
-        <View style={{marginBottom: 20}}>
+        {/* Test Buttons */}
+        <View style={{marginBottom: 20, gap: 10}}>
           <TouchableOpacity
             style={{
               backgroundColor: '#6c757d',
@@ -1017,8 +1204,189 @@ export function RecordingContainer(props: RecordingContainerProps) {
             </Text>
           </TouchableOpacity>
           
-
+          <TouchableOpacity
+            style={{
+              backgroundColor: '#007bff',
+              paddingVertical: 12,
+              paddingHorizontal: 20,
+              borderRadius: 10,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+            onPress={loadPatientData}
+            disabled={loadingPatients}>
+            {loadingPatients ? (
+              <ActivityIndicator size="small" color="#fff" style={{marginRight: 8}} />
+            ) : null}
+            <Text
+              style={{
+                color: '#fff',
+                fontSize: 14,
+                fontWeight: '600',
+                textAlign: 'center',
+              }}>
+              {loadingPatients ? 'Loading Patients...' : 'Load ICU Patients'}
+            </Text>
+          </TouchableOpacity>
         </View>
+
+        {/* ICU Selection Buttons - Only show when data is loaded */}
+        {patientData && (
+          <View style={{marginBottom: 20, gap: 10}}>
+            <Text style={{fontSize: 16, fontWeight: '600', color: '#333', textAlign: 'center', marginBottom: 10}}>
+              Select ICU Data
+            </Text>
+            
+            <TouchableOpacity
+              style={{
+                backgroundColor: '#e3f2fd',
+                paddingVertical: 15,
+                paddingHorizontal: 20,
+                borderRadius: 10,
+                borderWidth: 1,
+                borderColor: '#2196f3',
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}
+              onPress={() => openIndividualModal('patients')}>
+              <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                <Text style={{fontSize: 24, marginRight: 10}}>👤</Text>
+                <View>
+                  <Text style={{fontSize: 16, fontWeight: '600', color: '#1976d2'}}>
+                    Select Patient
+                  </Text>
+                  <Text style={{fontSize: 12, color: '#666'}}>
+                    {patientData.summary.total_patients} patients available
+                  </Text>
+                </View>
+              </View>
+              <Text style={{fontSize: 16, color: '#1976d2'}}>→</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={{
+                backgroundColor: '#e8f5e8',
+                paddingVertical: 15,
+                paddingHorizontal: 20,
+                borderRadius: 10,
+                borderWidth: 1,
+                borderColor: '#4caf50',
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}
+              onPress={() => openIndividualModal('wards')}>
+              <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                <Text style={{fontSize: 24, marginRight: 10}}>🏥</Text>
+                <View>
+                  <Text style={{fontSize: 16, fontWeight: '600', color: '#2e7d32'}}>
+                    Select Ward
+                  </Text>
+                  <Text style={{fontSize: 12, color: '#666'}}>
+                    {patientData.summary.total_wards} wards available
+                  </Text>
+                </View>
+              </View>
+              <Text style={{fontSize: 16, color: '#2e7d32'}}>→</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={{
+                backgroundColor: '#fff3e0',
+                paddingVertical: 15,
+                paddingHorizontal: 20,
+                borderRadius: 10,
+                borderWidth: 1,
+                borderColor: '#ff9800',
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}
+              onPress={() => openIndividualModal('users')}>
+              <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                <Text style={{fontSize: 24, marginRight: 10}}>👨‍⚕️</Text>
+                <View>
+                  <Text style={{fontSize: 16, fontWeight: '600', color: '#f57c00'}}>
+                    Select User
+                  </Text>
+                  <Text style={{fontSize: 12, color: '#666'}}>
+                    {patientData.summary.total_users} users available
+                  </Text>
+                </View>
+              </View>
+              <Text style={{fontSize: 16, color: '#f57c00'}}>→</Text>
+            </TouchableOpacity>
+
+            {/* Selected Items Summary */}
+            <View
+              style={{
+                padding: 15,
+                backgroundColor: '#f8f9fa',
+                borderRadius: 10,
+                borderWidth: 1,
+                borderColor: '#e0e0e0',
+                marginTop: 10,
+              }}>
+              <Text style={{fontSize: 14, fontWeight: '600', color: '#333', marginBottom: 8}}>
+                Selected Items:
+              </Text>
+              <View style={{flexDirection: 'row', flexWrap: 'wrap', gap: 8}}>
+                {selectedPatient && (
+                  <View
+                    style={{
+                      backgroundColor: '#e3f2fd',
+                      paddingHorizontal: 12,
+                      paddingVertical: 6,
+                      borderRadius: 15,
+                      borderWidth: 1,
+                      borderColor: '#2196f3',
+                    }}>
+                    <Text style={{fontSize: 12, color: '#1976d2', fontWeight: '500'}}>
+                      👤 {selectedPatient.name}
+                    </Text>
+                  </View>
+                )}
+                {selectedWard && (
+                  <View
+                    style={{
+                      backgroundColor: '#e8f5e8',
+                      paddingHorizontal: 12,
+                      paddingVertical: 6,
+                      borderRadius: 15,
+                      borderWidth: 1,
+                      borderColor: '#4caf50',
+                    }}>
+                    <Text style={{fontSize: 12, color: '#2e7d32', fontWeight: '500'}}>
+                      🏥 {selectedWard.desc}
+                    </Text>
+                  </View>
+                )}
+                {selectedUser && (
+                  <View
+                    style={{
+                      backgroundColor: '#fff3e0',
+                      paddingHorizontal: 12,
+                      paddingVertical: 6,
+                      borderRadius: 15,
+                      borderWidth: 1,
+                      borderColor: '#ff9800',
+                    }}>
+                    <Text style={{fontSize: 12, color: '#f57c00', fontWeight: '500'}}>
+                      👨‍⚕️ {selectedUser.loginname}
+                    </Text>
+                  </View>
+                )}
+              </View>
+              {!selectedPatient && !selectedWard && !selectedUser && (
+                <Text style={{fontSize: 12, color: '#666', fontStyle: 'italic'}}>
+                  No items selected
+                </Text>
+              )}
+            </View>
+          </View>
+        )}
 
         {/* Error Display */}
         {lastError && (
@@ -1221,7 +1589,262 @@ export function RecordingContainer(props: RecordingContainerProps) {
             </Text>
           </View>
         </View>
-      </KeyboardAvoidingView>
+
+
+        {/* Individual Selection Modal */}
+        <Modal
+          visible={showIndividualModal}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={closeIndividualModal}>
+          <View
+            style={{
+              flex: 1,
+              backgroundColor: 'rgba(0,0,0,0.5)',
+              justifyContent: 'flex-end',
+            }}>
+            <View
+              style={{
+                backgroundColor: '#fff',
+                borderTopLeftRadius: 20,
+                borderTopRightRadius: 20,
+                maxHeight: '80%',
+                minHeight: '60%',
+              }}>
+              {/* Modal Header */}
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  padding: 20,
+                  borderBottomWidth: 1,
+                  borderBottomColor: '#e0e0e0',
+                }}>
+                <Text
+                  style={{
+                    fontSize: 18,
+                    fontWeight: '600',
+                    color: '#333',
+                  }}>
+                  Select {activeTab.charAt(0).toUpperCase() + activeTab.slice(1)}
+                </Text>
+                <TouchableOpacity
+                  onPress={closeIndividualModal}
+                  style={{
+                    backgroundColor: '#dc3545',
+                    borderRadius: 15,
+                    width: 30,
+                    height: 30,
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                  }}>
+                  <Text style={{color: '#fff', fontSize: 16, fontWeight: 'bold'}}>
+                    ×
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Content based on active tab */}
+              <View style={{flex: 1}}>
+                {activeTab === 'patients' && (
+                  <FlatList
+                    data={patientData?.patient_list || []}
+                    keyExtractor={(item) => item.patientid}
+                    style={{flex: 1}}
+                    renderItem={({item}) => (
+                      <TouchableOpacity
+                        style={{
+                          padding: 15,
+                          borderBottomWidth: 1,
+                          borderBottomColor: '#f0f0f0',
+                          backgroundColor: selectedPatient?.patientid === item.patientid ? '#e3f2fd' : '#fff',
+                        }}
+                        onPress={() => {
+                          selectPatient(item);
+                          closeIndividualModal();
+                        }}>
+                        <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start'}}>
+                          <View style={{flex: 1}}>
+                            <Text
+                              style={{
+                                fontSize: 16,
+                                fontWeight: '600',
+                                color: '#333',
+                                marginBottom: 4,
+                              }}>
+                              {item.name || 'Unknown Patient'}
+                            </Text>
+                            <Text style={{fontSize: 14, color: '#666', marginBottom: 2}}>
+                              Bed: {item.bed} • Room: {item.room}
+                            </Text>
+                            <Text style={{fontSize: 12, color: '#888'}}>
+                              Ward: {item.ward} • Age: {item.age} • Gender: {item.gender}
+                            </Text>
+                            {item.diagnosis && (
+                              <Text style={{fontSize: 12, color: '#666', marginTop: 4, fontStyle: 'italic'}}>
+                                Diagnosis: {item.diagnosis}
+                              </Text>
+                            )}
+                          </View>
+                          {selectedPatient?.patientid === item.patientid && (
+                            <View
+                              style={{
+                                backgroundColor: '#28a745',
+                                borderRadius: 10,
+                                paddingHorizontal: 8,
+                                paddingVertical: 4,
+                              }}>
+                              <Text style={{color: '#fff', fontSize: 12, fontWeight: '600'}}>
+                                SELECTED
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                      </TouchableOpacity>
+                    )}
+                    ListEmptyComponent={
+                      <View style={{padding: 20, alignItems: 'center'}}>
+                        <Text style={{fontSize: 16, color: '#666'}}>
+                          No patients found
+                        </Text>
+                      </View>
+                    }
+                  />
+                )}
+
+                {activeTab === 'wards' && (
+                  <FlatList
+                    data={patientData?.ward_list || []}
+                    keyExtractor={(item) => item.unitid}
+                    style={{flex: 1}}
+                    renderItem={({item}) => (
+                      <TouchableOpacity
+                        style={{
+                          padding: 15,
+                          borderBottomWidth: 1,
+                          borderBottomColor: '#f0f0f0',
+                          backgroundColor: selectedWard?.unitid === item.unitid ? '#e3f2fd' : '#fff',
+                        }}
+                        onPress={() => {
+                          selectWard(item);
+                          closeIndividualModal();
+                        }}>
+                        <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start'}}>
+                          <View style={{flex: 1}}>
+                            <Text
+                              style={{
+                                fontSize: 16,
+                                fontWeight: '600',
+                                color: '#333',
+                                marginBottom: 4,
+                              }}>
+                              {item.desc || 'Unknown Ward'}
+                            </Text>
+                            <Text style={{fontSize: 14, color: '#666', marginBottom: 2}}>
+                              Code: {item.code} • Capacity: {item.capacity}
+                            </Text>
+                            <Text style={{fontSize: 12, color: '#888'}}>
+                              Unit ID: {item.unitid}
+                            </Text>
+                          </View>
+                          {selectedWard?.unitid === item.unitid && (
+                            <View
+                              style={{
+                                backgroundColor: '#28a745',
+                                borderRadius: 10,
+                                paddingHorizontal: 8,
+                                paddingVertical: 4,
+                              }}>
+                              <Text style={{color: '#fff', fontSize: 12, fontWeight: '600'}}>
+                                SELECTED
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                      </TouchableOpacity>
+                    )}
+                    ListEmptyComponent={
+                      <View style={{padding: 20, alignItems: 'center'}}>
+                        <Text style={{fontSize: 16, color: '#666'}}>
+                          No wards found
+                        </Text>
+                      </View>
+                    }
+                  />
+                )}
+
+                {activeTab === 'users' && (
+                  <FlatList
+                    data={patientData?.user_list || []}
+                    keyExtractor={(item) => item.userid}
+                    style={{flex: 1}}
+                    renderItem={({item}) => (
+                      <TouchableOpacity
+                        style={{
+                          padding: 15,
+                          borderBottomWidth: 1,
+                          borderBottomColor: '#f0f0f0',
+                          backgroundColor: selectedUser?.userid === item.userid ? '#e3f2fd' : '#fff',
+                        }}
+                        onPress={() => {
+                          selectUser(item);
+                          closeIndividualModal();
+                        }}>
+                        <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start'}}>
+                          <View style={{flex: 1}}>
+                            <Text
+                              style={{
+                                fontSize: 16,
+                                fontWeight: '600',
+                                color: '#333',
+                                marginBottom: 4,
+                              }}>
+                              {item.loginname || 'Unknown User'}
+                            </Text>
+                            <Text style={{fontSize: 14, color: '#666', marginBottom: 2}}>
+                              Group: {item.groupname} • Status: {item.status}
+                            </Text>
+                            <Text style={{fontSize: 12, color: '#888'}}>
+                              User ID: {item.userid} • Rights: {item.rights}
+                            </Text>
+                            {item.wards && (
+                              <Text style={{fontSize: 12, color: '#666', marginTop: 4, fontStyle: 'italic'}}>
+                                Wards: {item.wards}
+                              </Text>
+                            )}
+                          </View>
+                          {selectedUser?.userid === item.userid && (
+                            <View
+                              style={{
+                                backgroundColor: '#28a745',
+                                borderRadius: 10,
+                                paddingHorizontal: 8,
+                                paddingVertical: 4,
+                              }}>
+                              <Text style={{color: '#fff', fontSize: 12, fontWeight: '600'}}>
+                                SELECTED
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                      </TouchableOpacity>
+                    )}
+                    ListEmptyComponent={
+                      <View style={{padding: 20, alignItems: 'center'}}>
+                        <Text style={{fontSize: 16, color: '#666'}}>
+                          No users found
+                        </Text>
+                      </View>
+                    }
+                  />
+                )}
+              </View>
+            </View>
+          </View>
+        </Modal>
+        </KeyboardAvoidingView>
+      </ScrollView>
     </SafeAreaView>
   );
 }
