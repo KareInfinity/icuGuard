@@ -52,11 +52,33 @@ interface Patient {
   hr: string;
   sp02: string;
   bp: string;
-  admission: string;
+  temp?: string;
+  rr?: string;
+  gcs?: string;
+  pain?: string;
+  allergies?: string;
+  diagnosis: string;
+  notes?: string;
+  admission_date?: string;
+  discharge_date?: string;
+  status?: string;
   age: string;
   gender: string;
   weight: string;
-  diagnosis: string;
+  height?: string;
+  mrn?: string;
+  dob?: string;
+  phone?: string;
+  address?: string;
+  emergency_contact?: string;
+  emergency_phone?: string;
+  insurance?: string;
+  policy_number?: string;
+  physician?: string;
+  nurse?: string;
+  shift?: string;
+  last_updated?: string;
+  admission: string;
   nhino: string;
   dischargedate: string;
   ic: string;
@@ -65,9 +87,17 @@ interface Patient {
 
 interface Ward {
   unitid: string;
+  wardid?: string;
   desc: string;
+  name?: string;
   code: string;
   capacity: string;
+  current_patients?: string;
+  available_beds?: string;
+  location?: string;
+  phone?: string;
+  head_nurse?: string;
+  description?: string;
 }
 
 interface User {
@@ -77,6 +107,12 @@ interface User {
   rights: string;
   status: string;
   wards: string;
+  name?: string;
+  email?: string;
+  phone?: string;
+  role?: string;
+  shift?: string;
+  last_login?: string;
 }
 
 interface PatientListResponse {

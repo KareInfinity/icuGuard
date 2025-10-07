@@ -123,10 +123,24 @@ def _cleanup_session_files(session_id: str, session_audio_dir: str):
     except Exception as cleanup_error:
         logger.error(f"[SESSION {session_id}] Error during cleanup: {str(cleanup_error)}")
 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifespan events"""
+    # Startup
+    logger.info("Starting audio processing thread...")
+    audio_processor.start()
+    yield
+    # Shutdown
+    logger.info("Stopping audio processing thread...")
+    audio_processor.stop()
+
 app = FastAPI(
     title="Whisper Real-time Transcription API",
     description="WebSocket API for real-time audio transcription using faster-whisper model",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Add CORS middleware
@@ -441,32 +455,48 @@ async def icu_login(
         JSON with login status and JWT token
     """
     try:
+        logger.info(f"=== ICU Care Lite POST /icu/login START ===")
         logger.info(f"ICU Care Lite login request for user: {username}")
+        logger.info(f"ICU Care Lite login parameters - username: {username}, code: {code}")
         
         # Create ICU client instance
+        logger.info("ICU Care Lite - Creating ICU client instance for login")
         icu_client = ICUCareLiteClient()
+        logger.info(f"ICU Care Lite - Client created with base URL: {icu_client.base_url}")
         
         # Attempt login
+        logger.info("ICU Care Lite - Starting login process")
         login_success = icu_client.login(username, password, code)
+        logger.info(f"ICU Care Lite - Login result: {login_success}")
         
         if login_success:
-            return {
+            success_response = {
                 "success": True,
                 "message": "ICU Care Lite login successful",
                 "username": username,
                 "jwt_token": icu_client.jwt_token,
                 "timestamp": datetime.now().isoformat()
             }
+            logger.info(f"ICU Care Lite - Login successful response: {success_response}")
+            logger.info(f"=== ICU Care Lite POST /icu/login SUCCESS ===")
+            return success_response
         else:
-            return {
+            error_response = {
                 "success": False,
                 "message": "ICU Care Lite login failed",
                 "username": username,
                 "timestamp": datetime.now().isoformat()
             }
+            logger.error(f"ICU Care Lite - Login failed response: {error_response}")
+            logger.info(f"=== ICU Care Lite POST /icu/login FAILED ===")
+            return error_response
             
     except Exception as e:
         logger.error(f"ICU Care Lite login error: {str(e)}")
+        logger.error(f"ICU Care Lite login error type: {type(e).__name__}")
+        import traceback
+        logger.error(f"ICU Care Lite login traceback: {traceback.format_exc()}")
+        logger.info(f"=== ICU Care Lite POST /icu/login ERROR ===")
         raise HTTPException(status_code=500, detail=f"ICU Care Lite login failed: {str(e)}")
 
 @app.post("/icu/patient-list")
@@ -491,27 +521,40 @@ async def icu_get_patient_list(
         JSON with patient list, ward list, and user list
     """
     try:
+        logger.info(f"=== ICU Care Lite POST /icu/patient-list START ===")
         logger.info(f"ICU Care Lite patient list request for user: {username}")
+        logger.info(f"ICU Care Lite request parameters - username: {username}, code: {code}")
+        logger.info(f"ICU Care Lite request parameters - shift_start: {shift_start}, shift_end: {shift_end}")
         
         # Create ICU client instance
+        logger.info("ICU Care Lite - Creating ICU client instance")
         icu_client = ICUCareLiteClient()
+        logger.info(f"ICU Care Lite - Client created with base URL: {icu_client.base_url}")
         
         # Login first
+        logger.info("ICU Care Lite - Starting login process")
         login_success = icu_client.login(username, password, code)
+        logger.info(f"ICU Care Lite - Login result: {login_success}")
         
         if not login_success:
-            return {
+            logger.error("ICU Care Lite - Login failed, returning error response")
+            error_response = {
                 "success": False,
                 "message": "ICU Care Lite login failed",
                 "username": username,
                 "timestamp": datetime.now().isoformat()
             }
+            logger.info(f"ICU Care Lite - Error response: {error_response}")
+            return error_response
         
         # Get patient list
+        logger.info("ICU Care Lite - Login successful, getting patient list")
         patient_data = icu_client.get_patient_list(shift_start, shift_end)
+        logger.info(f"ICU Care Lite - Patient data result: {patient_data is not None}")
         
         if patient_data:
-            return {
+            logger.info(f"ICU Care Lite - Patient data summary: {patient_data.get('summary', 'No summary')}")
+            success_response = {
                 "success": True,
                 "message": "ICU Care Lite data retrieved successfully",
                 "username": username,
@@ -522,16 +565,27 @@ async def icu_get_patient_list(
                 "user_list": patient_data["users"],
                 "jwt_token": patient_data["jwt_token"]
             }
+            logger.info(f"ICU Care Lite - Success response prepared with {len(patient_data['patients'])} patients")
+            logger.info(f"=== ICU Care Lite POST /icu/patient-list SUCCESS ===")
+            return success_response
         else:
-            return {
+            logger.error("ICU Care Lite - Failed to retrieve patient data")
+            error_response = {
                 "success": False,
                 "message": "Failed to retrieve ICU Care Lite data",
                 "username": username,
                 "timestamp": datetime.now().isoformat()
             }
+            logger.info(f"ICU Care Lite - Error response: {error_response}")
+            logger.info(f"=== ICU Care Lite POST /icu/patient-list FAILED ===")
+            return error_response
             
     except Exception as e:
         logger.error(f"ICU Care Lite patient list error: {str(e)}")
+        logger.error(f"ICU Care Lite error type: {type(e).__name__}")
+        import traceback
+        logger.error(f"ICU Care Lite traceback: {traceback.format_exc()}")
+        logger.info(f"=== ICU Care Lite POST /icu/patient-list ERROR ===")
         raise HTTPException(status_code=500, detail=f"ICU Care Lite patient list failed: {str(e)}")
 
 @app.get("/icu/patient-list")
@@ -556,27 +610,40 @@ async def icu_get_patient_list_get(
         JSON with patient list, ward list, and user list
     """
     try:
+        logger.info(f"=== ICU Care Lite GET /icu/patient-list START ===")
         logger.info(f"ICU Care Lite patient list GET request for user: {username}")
+        logger.info(f"ICU Care Lite GET request parameters - username: {username}, code: {code}")
+        logger.info(f"ICU Care Lite GET request parameters - shift_start: {shift_start}, shift_end: {shift_end}")
         
         # Create ICU client instance
+        logger.info("ICU Care Lite GET - Creating ICU client instance")
         icu_client = ICUCareLiteClient()
+        logger.info(f"ICU Care Lite GET - Client created with base URL: {icu_client.base_url}")
         
         # Login first
+        logger.info("ICU Care Lite GET - Starting login process")
         login_success = icu_client.login(username, password, code)
+        logger.info(f"ICU Care Lite GET - Login result: {login_success}")
         
         if not login_success:
-            return {
+            logger.error("ICU Care Lite GET - Login failed, returning error response")
+            error_response = {
                 "success": False,
                 "message": "ICU Care Lite login failed",
                 "username": username,
                 "timestamp": datetime.now().isoformat()
             }
+            logger.info(f"ICU Care Lite GET - Error response: {error_response}")
+            return error_response
         
         # Get patient list
+        logger.info("ICU Care Lite GET - Login successful, getting patient list")
         patient_data = icu_client.get_patient_list(shift_start, shift_end)
+        logger.info(f"ICU Care Lite GET - Patient data result: {patient_data is not None}")
         
         if patient_data:
-            return {
+            logger.info(f"ICU Care Lite GET - Patient data summary: {patient_data.get('summary', 'No summary')}")
+            success_response = {
                 "success": True,
                 "message": "ICU Care Lite data retrieved successfully",
                 "username": username,
@@ -587,17 +654,51 @@ async def icu_get_patient_list_get(
                 "user_list": patient_data["users"],
                 "jwt_token": patient_data["jwt_token"]
             }
+            logger.info(f"ICU Care Lite GET - Success response prepared with {len(patient_data['patients'])} patients")
+            logger.info(f"=== ICU Care Lite GET /icu/patient-list SUCCESS ===")
+            return success_response
         else:
-            return {
+            logger.error("ICU Care Lite GET - Failed to retrieve patient data")
+            error_response = {
                 "success": False,
                 "message": "Failed to retrieve ICU Care Lite data",
                 "username": username,
                 "timestamp": datetime.now().isoformat()
             }
+            logger.info(f"ICU Care Lite GET - Error response: {error_response}")
+            logger.info(f"=== ICU Care Lite GET /icu/patient-list FAILED ===")
+            return error_response
             
     except Exception as e:
-        logger.error(f"ICU Care Lite patient list error: {str(e)}")
+        logger.error(f"ICU Care Lite patient list GET error: {str(e)}")
+        logger.error(f"ICU Care Lite GET error type: {type(e).__name__}")
+        import traceback
+        logger.error(f"ICU Care Lite GET traceback: {traceback.format_exc()}")
+        logger.info(f"=== ICU Care Lite GET /icu/patient-list ERROR ===")
         raise HTTPException(status_code=500, detail=f"ICU Care Lite patient list failed: {str(e)}")
+
+@app.get("/")
+async def root_endpoint():
+    """Root endpoint for health checks and basic server info"""
+    return {
+        "message": "ICU Guard Server is running",
+        "status": "healthy",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/health",
+            "icu_login": "/icu/login",
+            "icu_patient_list": "/icu/patient-list",
+            "websocket": "/ws/transcribe",
+            "ui_websocket": "/ws/ui"
+        },
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.get("/favicon.ico")
+async def favicon():
+    """Handle favicon requests to prevent 404 errors"""
+    from fastapi.responses import Response
+    return Response(content="", media_type="image/x-icon")
 
 @app.get("/health")
 async def health_check():
@@ -2072,7 +2173,7 @@ class AudioProcessor:
 
 # ICU Care Lite Client Class
 class ICUCareLiteClient:
-    def __init__(self, base_url="https://icucarelite_demo.aixelink.com:88"):
+    def __init__(self, base_url="https://icucarelite_demo.aixelink.com"):
         self.base_url = base_url
         self.session = None
         self.jwt_token = None
@@ -2097,8 +2198,10 @@ class ICUCareLiteClient:
     def login(self, username="tony", password="icu@123", code=""):
         """Login to ICU system and get JWT token"""
         logger.info(f"ICU Care Lite Login attempt for user: {username}")
+        logger.info(f"ICU Care Lite Base URL: {self.base_url}")
         
         login_url = f"{self.base_url}/api/users/login"
+        logger.info(f"ICU Care Lite Login URL: {login_url}")
         
         headers = {
             "Cache-Control": "no-cache",
@@ -2106,32 +2209,53 @@ class ICUCareLiteClient:
             "Referer": f"{self.base_url}/",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
         }
+        logger.info(f"ICU Care Lite Request headers: {headers}")
         
         login_data = {
             "username": username,
             "password": password,
             "code": code
         }
+        logger.info(f"ICU Care Lite Request data: {login_data}")
         
         try:
+            logger.info(f"ICU Care Lite - Sending POST request to: {login_url}")
             response = self.session.post(login_url, json=login_data, headers=headers, timeout=30)
             
+            logger.info(f"ICU Care Lite Response status code: {response.status_code}")
+            logger.info(f"ICU Care Lite Response headers: {dict(response.headers)}")
+            
             if response.status_code == 200:
-                response_data = response.json()
-                
-                if 'data' in response_data and 'accessToken' in response_data['data']:
-                    self.jwt_token = response_data['data']['accessToken']
-                    logger.info(f"ICU Care Lite login successful for user: {username}")
-                    return True
-                else:
-                    logger.error("No access token in ICU Care Lite response")
+                try:
+                    response_data = response.json()
+                    logger.info(f"ICU Care Lite Response data: {response_data}")
+                    
+                    if 'data' in response_data and 'accessToken' in response_data['data']:
+                        self.jwt_token = response_data['data']['accessToken']
+                        logger.info(f"ICU Care Lite login successful for user: {username}")
+                        logger.info(f"ICU Care Lite JWT token obtained: {self.jwt_token[:20]}...")
+                        return True
+                    else:
+                        logger.error(f"No access token in ICU Care Lite response. Full response: {response_data}")
+                        return False
+                except Exception as json_error:
+                    logger.error(f"ICU Care Lite JSON parsing error: {json_error}")
+                    logger.error(f"ICU Care Lite Raw response text: {response.text}")
                     return False
             else:
                 logger.error(f"ICU Care Lite login failed with status {response.status_code}")
+                try:
+                    error_response = response.text
+                    logger.error(f"ICU Care Lite Error response: {error_response}")
+                except Exception as text_error:
+                    logger.error(f"ICU Care Lite Error reading response text: {text_error}")
                 return False
                 
         except Exception as e:
             logger.error(f"ICU Care Lite login error: {e}")
+            logger.error(f"ICU Care Lite error type: {type(e).__name__}")
+            import traceback
+            logger.error(f"ICU Care Lite traceback: {traceback.format_exc()}")
             return False
     
     def get_patient_list(self, shift_start="2025-09-26 14:00", shift_end="2025-09-26 22:00"):
@@ -2141,8 +2265,11 @@ class ICUCareLiteClient:
             return None
         
         logger.info("ICU Care Lite - Getting patient list")
+        logger.info(f"ICU Care Lite - Shift start: {shift_start}, Shift end: {shift_end}")
+        logger.info(f"ICU Care Lite - JWT token available: {self.jwt_token[:20] if self.jwt_token else 'None'}...")
         
         api_url = f"{self.base_url}/api/dataplus"
+        logger.info(f"ICU Care Lite - API URL: {api_url}")
         
         headers = {
             "Cache-Control": "no-cache",
@@ -2150,6 +2277,7 @@ class ICUCareLiteClient:
             "Referer": f"{self.base_url}/",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
         }
+        logger.info(f"ICU Care Lite - Request headers: {headers}")
         
         # XML request body
         xml_body = f"""<bd OrgUnitID="" ShiftStartDateTime="{shift_start}" ShiftEndDateTime="{shift_end}" jwt="{self.jwt_token}">
@@ -2197,28 +2325,61 @@ class ICUCareLiteClient:
 </whiteboard>
 </bd>"""
         
+        logger.info(f"ICU Care Lite - XML request body length: {len(xml_body)} characters")
+        logger.info(f"ICU Care Lite - XML request body preview: {xml_body[:200]}...")
+        
         try:
+            logger.info(f"ICU Care Lite - Sending POST request to: {api_url}")
             response = self.session.post(api_url, data=xml_body, headers=headers, timeout=30)
             
+            logger.info(f"ICU Care Lite - Response status code: {response.status_code}")
+            logger.info(f"ICU Care Lite - Response headers: {dict(response.headers)}")
+            logger.info(f"ICU Care Lite - Response content length: {len(response.text)} characters")
+            logger.info(f"ICU Care Lite - Response content preview: {response.text[:500]}...")
+            
             if response.status_code == 200:
-                return self.parse_patient_data(response.text)
+                logger.info("ICU Care Lite - Parsing patient data from XML response")
+                result = self.parse_patient_data(response.text)
+                if result:
+                    logger.info(f"ICU Care Lite - Successfully parsed patient data: {result['summary']}")
+                else:
+                    logger.error("ICU Care Lite - Failed to parse patient data from XML response")
+                return result
             else:
                 logger.error(f"ICU Care Lite patient list request failed: {response.status_code}")
+                logger.error(f"ICU Care Lite Error response: {response.text}")
                 return None
                 
         except Exception as e:
             logger.error(f"ICU Care Lite patient list error: {e}")
+            logger.error(f"ICU Care Lite error type: {type(e).__name__}")
+            import traceback
+            logger.error(f"ICU Care Lite traceback: {traceback.format_exc()}")
             return None
     
     def parse_patient_data(self, xml_response):
         """Parse XML response and extract patient data"""
+        logger.info(f"ICU Care Lite - Starting XML parsing, response length: {len(xml_response)} characters")
+        logger.info(f"ICU Care Lite - XML response preview: {xml_response[:300]}...")
+        
         try:
+            logger.info("ICU Care Lite - Parsing XML with ElementTree")
             root = ET.fromstring(xml_response)
+            logger.info(f"ICU Care Lite - XML root tag: {root.tag}")
+            logger.info(f"ICU Care Lite - XML root attributes: {root.attrib}")
             
             # Extract data
+            logger.info("ICU Care Lite - Extracting wards from XML")
             wards = root.findall(".//ward")
+            logger.info(f"ICU Care Lite - Found {len(wards)} wards")
+            
+            logger.info("ICU Care Lite - Extracting users from XML")
             users = root.findall(".//securityrights")
+            logger.info(f"ICU Care Lite - Found {len(users)} users")
+            
+            logger.info("ICU Care Lite - Extracting patients from XML")
             patients = root.findall(".//entry")
+            logger.info(f"ICU Care Lite - Found {len(patients)} patients")
             
             logger.info(f"ICU Care Lite data retrieved - Wards: {len(wards)}, Users: {len(users)}, Patients: {len(patients)}")
             
@@ -2237,28 +2398,37 @@ class ICUCareLiteClient:
             }
             
             # Extract wards
-            for ward in wards:
-                data["wards"].append({
+            logger.info("ICU Care Lite - Processing wards data")
+            for i, ward in enumerate(wards):
+                ward_data = {
                     "unitid": ward.findtext("unitid", ""),
                     "desc": ward.findtext("desc", ""),
                     "code": ward.findtext("code", ""),
                     "capacity": ward.findtext("capacity", "")
-                })
+                }
+                data["wards"].append(ward_data)
+                if i < 3:  # Log first 3 wards for debugging
+                    logger.info(f"ICU Care Lite - Ward {i+1}: {ward_data}")
             
             # Extract users
-            for user in users:
-                data["users"].append({
+            logger.info("ICU Care Lite - Processing users data")
+            for i, user in enumerate(users):
+                user_data = {
                     "userid": user.findtext("userid", ""),
                     "loginname": user.findtext("loginname", ""),
                     "groupname": user.findtext("groupname", ""),
                     "rights": user.findtext("rights", ""),
                     "status": user.findtext("status", ""),
                     "wards": user.findtext("wards", "")
-                })
+                }
+                data["users"].append(user_data)
+                if i < 3:  # Log first 3 users for debugging
+                    logger.info(f"ICU Care Lite - User {i+1}: {user_data}")
             
             # Extract patients
-            for patient in patients:
-                data["patients"].append({
+            logger.info("ICU Care Lite - Processing patients data")
+            for i, patient in enumerate(patients):
+                patient_data = {
                     "patientid": patient.findtext("patientid", ""),
                     "eventid": patient.findtext("eventid", ""),
                     "name": patient.findtext("name", ""),
@@ -2279,12 +2449,23 @@ class ICUCareLiteClient:
                     "dischargedate": patient.findtext("dischargedate", ""),
                     "ic": patient.findtext("ic", ""),
                     "drname": patient.findtext("drname", "")
-                })
+                }
+                data["patients"].append(patient_data)
+                if i < 3:  # Log first 3 patients for debugging
+                    logger.info(f"ICU Care Lite - Patient {i+1}: {patient_data}")
             
+            logger.info(f"ICU Care Lite - Successfully parsed all data: {data['summary']}")
             return data
             
         except ET.ParseError as e:
             logger.error(f"ICU Care Lite XML parsing error: {e}")
+            logger.error(f"ICU Care Lite XML content that failed to parse: {xml_response[:1000]}...")
+            return None
+        except Exception as e:
+            logger.error(f"ICU Care Lite unexpected error during XML parsing: {e}")
+            logger.error(f"ICU Care Lite error type: {type(e).__name__}")
+            import traceback
+            logger.error(f"ICU Care Lite traceback: {traceback.format_exc()}")
             return None
 
 # Configuration
@@ -2372,15 +2553,6 @@ async def cleanup_session(session_id):
             elif session_dir and not ENABLE_AUTO_CLEANUP:
                 logger.info(f"[SESSION {session_id}] Auto-cleanup disabled - session directory preserved: {session_dir}")
 
-@app.on_event("startup")
-async def startup_event():
-    """Start the audio processing thread when the app starts"""
-    audio_processor.start()
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Stop the audio processing thread when the app shuts down"""
-    audio_processor.stop()
 
 @app.websocket("/ws/ui")
 async def ui_websocket_endpoint(websocket: WebSocket):
@@ -2420,9 +2592,16 @@ if __name__ == "__main__":
     logger.info("Starting Faster-Whisper Real-time Transcription API server")
     uvicorn.run(
         app, 
-        host="192.168.1.16",  # Listen on all interfaces for server deployment
+        host="192.168.1.21",  # Listen on all interfaces for server deployment
         port=8111,
         timeout_keep_alive=3600,  # 1 hour keep-alive timeout
         timeout_graceful_shutdown=60,  # 1 minute graceful shutdown
-        access_log=True
+        access_log=True,
+        # Performance optimizations
+        workers=1,  # Single worker for better memory usage
+        loop="asyncio",  # Use asyncio event loop
+        # Response time optimizations
+        limit_concurrency=1000,  # Limit concurrent connections
+        limit_max_requests=10000,  # Restart worker after 10k requests
+        backlog=2048,  # Increase backlog for better connection handling
     )
