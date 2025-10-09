@@ -115,6 +115,12 @@ interface User {
   last_login?: string;
 }
 
+interface Assessment {
+  id: string;
+  type: string;
+  title: string;
+}
+
 interface PatientListResponse {
   success: boolean;
   message: string;
@@ -163,8 +169,33 @@ export function RecordingContainer(props: RecordingContainerProps) {
   const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
   const [selectedWard, setSelectedWard] = useState<Ward | null>(null);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
-  const [activeTab, setActiveTab] = useState<'patients' | 'wards' | 'users'>('patients');
+  const [selectedAssessment, setSelectedAssessment] = useState<Assessment | null>(null);
+  const [activeTab, setActiveTab] = useState<'patients' | 'wards' | 'users' | 'assessments'>('patients');
   const [showIndividualModal, setShowIndividualModal] = useState(false);
+
+  // Assessment options
+  const assessmentOptions: Assessment[] = [
+    {
+      id: "neuro_001",
+      type: "neurological",
+      title: "Neurological Assessment"
+    },
+    {
+      id: "pain_001", 
+      type: "pain_assessment",
+      title: "Pain Assessment"
+    },
+    {
+      id: "sbar_001",
+      type: "sbar",
+      title: "SBAR Assessment - 1"
+    },
+    {
+      id: "sbar_002",
+      type: "sbar", 
+      title: "SBAR Assessment - 2"
+    }
+  ];
 
   // Audio recording state
   const fullAudioData = useRef<string>('');
@@ -402,33 +433,42 @@ export function RecordingContainer(props: RecordingContainerProps) {
   const selectPatient = (patient: Patient) => {
     setSelectedPatient(patient);
     console.log('👤 Selected patient:', patient.name);
-    Alert.alert(
-      'Patient Selected',
-      `Selected: ${patient.name}\nBed: ${patient.bed}\nRoom: ${patient.room}\nWard: ${patient.ward}`,
-    );
+    // Alert.alert(
+    //   'Patient Selected',
+    //   `Selected: ${patient.name}\nBed: ${patient.bed}\nRoom: ${patient.room}\nWard: ${patient.ward}`,
+    // );
   };
 
   const selectWard = (ward: Ward) => {
     setSelectedWard(ward);
     console.log('🏥 Selected ward:', ward.desc);
-    Alert.alert(
-      'Ward Selected',
-      `Selected: ${ward.desc}\nCode: ${ward.code}\nCapacity: ${ward.capacity}`,
-    );
+    // Alert.alert(
+    //   'Ward Selected',
+    //   `Selected: ${ward.desc}\nCode: ${ward.code}\nCapacity: ${ward.capacity}`,
+    // );
   };
 
   const selectUser = (user: User) => {
     setSelectedUser(user);
     console.log('👨‍⚕️ Selected user:', user.loginname);
-    Alert.alert(
-      'User Selected',
-      `Selected: ${user.loginname}\nGroup: ${user.groupname}\nStatus: ${user.status}`,
-    );
+    // Alert.alert(
+    //   'User Selected',
+    //   `Selected: ${user.loginname}\nGroup: ${user.groupname}\nStatus: ${user.status}`,
+    // );
+  };
+
+  const selectAssessment = (assessment: Assessment) => {
+    setSelectedAssessment(assessment);
+    console.log('📋 Selected assessment:', assessment.title);
+    // Alert.alert(
+    //   'Assessment Selected',
+    //   `Selected: ${assessment.title}\nType: ${assessment.type}\nID: ${assessment.id}`,
+    // );
   };
 
 
-  const openIndividualModal = (type: 'patients' | 'wards' | 'users') => {
-    if (!patientData) {
+  const openIndividualModal = (type: 'patients' | 'wards' | 'users' | 'assessments') => {
+    if (type !== 'assessments' && !patientData) {
       Alert.alert('No Data', 'Please load ICU data first');
       return;
     }
@@ -638,6 +678,12 @@ export function RecordingContainer(props: RecordingContainerProps) {
             rights: selectedUser.rights,
             status: selectedUser.status,
             wards: selectedUser.wards
+          } : null,
+          // Include selected assessment data
+          assessment: selectedAssessment ? {
+            id: selectedAssessment.id,
+            type: selectedAssessment.type,
+            title: selectedAssessment.title
           } : null,
           // Include username for session tracking
           username: username || 'unknown'
@@ -1145,8 +1191,11 @@ export function RecordingContainer(props: RecordingContainerProps) {
     <SafeAreaView style={{flex: 1, backgroundColor: '#f9f9f9'}}>
       <ScrollView 
         style={{flex: 1}}
+        contentContainerStyle={{flexGrow: 1, paddingBottom: 20}}
         showsVerticalScrollIndicator={true}
-        keyboardShouldPersistTaps="handled">
+        keyboardShouldPersistTaps="handled"
+        bounces={false}
+        alwaysBounceVertical={false}>
         <KeyboardAvoidingView
           style={{margin: 10, justifyContent: 'center'}}
           behavior="padding">
@@ -1337,7 +1386,7 @@ export function RecordingContainer(props: RecordingContainerProps) {
               <Text style={{fontSize: 16, color: '#1976d2'}}>→</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity
+          {/*  <TouchableOpacity
               style={{
                 backgroundColor: '#e8f5e8',
                 paddingVertical: 15,
@@ -1389,6 +1438,33 @@ export function RecordingContainer(props: RecordingContainerProps) {
                 </View>
               </View>
               <Text style={{fontSize: 16, color: '#f57c00'}}>→</Text>
+            </TouchableOpacity> */}
+
+            <TouchableOpacity
+              style={{
+                backgroundColor: '#f3e5f5',
+                paddingVertical: 15,
+                paddingHorizontal: 20,
+                borderRadius: 10,
+                borderWidth: 1,
+                borderColor: '#9c27b0',
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}
+              onPress={() => openIndividualModal('assessments')}>
+              <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                <Text style={{fontSize: 24, marginRight: 10}}>📋</Text>
+                <View>
+                  <Text style={{fontSize: 16, fontWeight: '600', color: '#7b1fa2'}}>
+                    Select Assessment
+                  </Text>
+                  <Text style={{fontSize: 12, color: '#666'}}>
+                    {assessmentOptions.length} assessment types available
+                  </Text>
+                </View>
+              </View>
+              <Text style={{fontSize: 16, color: '#7b1fa2'}}>→</Text>
             </TouchableOpacity>
 
             {/* Selected Items Summary */}
@@ -1450,8 +1526,23 @@ export function RecordingContainer(props: RecordingContainerProps) {
                     </Text>
                   </View>
                 )}
+                {selectedAssessment && (
+                  <View
+                    style={{
+                      backgroundColor: '#f3e5f5',
+                      paddingHorizontal: 12,
+                      paddingVertical: 6,
+                      borderRadius: 15,
+                      borderWidth: 1,
+                      borderColor: '#9c27b0',
+                    }}>
+                    <Text style={{fontSize: 12, color: '#7b1fa2', fontWeight: '500'}}>
+                      📋 {selectedAssessment.title}
+                    </Text>
+                  </View>
+                )}
               </View>
-              {!selectedPatient && !selectedWard && !selectedUser && (
+              {!selectedPatient && !selectedWard && !selectedUser && !selectedAssessment && (
                 <Text style={{fontSize: 12, color: '#666', fontStyle: 'italic'}}>
                   No items selected
                 </Text>
@@ -1906,6 +1997,67 @@ export function RecordingContainer(props: RecordingContainerProps) {
                       <View style={{padding: 20, alignItems: 'center'}}>
                         <Text style={{fontSize: 16, color: '#666'}}>
                           No users found
+                        </Text>
+                      </View>
+                    }
+                  />
+                )}
+
+                {activeTab === 'assessments' && (
+                  <FlatList
+                    data={assessmentOptions}
+                    keyExtractor={(item) => item.id}
+                    style={{flex: 1}}
+                    renderItem={({item}) => (
+                      <TouchableOpacity
+                        style={{
+                          padding: 15,
+                          borderBottomWidth: 1,
+                          borderBottomColor: '#f0f0f0',
+                          backgroundColor: selectedAssessment?.id === item.id ? '#f3e5f5' : '#fff',
+                        }}
+                        onPress={() => {
+                          selectAssessment(item);
+                          closeIndividualModal();
+                        }}>
+                        <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start'}}>
+                          <View style={{flex: 1}}>
+                            <Text
+                              style={{
+                                fontSize: 16,
+                                fontWeight: '600',
+                                color: '#333',
+                                marginBottom: 4,
+                              }}>
+                              {item.title}
+                            </Text>
+                            <Text style={{fontSize: 14, color: '#666', marginBottom: 2}}>
+                              Type: {item.type} • ID: {item.id}
+                            </Text>
+                            <Text style={{fontSize: 12, color: '#888'}}>
+                              Assessment Type: {item.type.replace('_', ' ').toUpperCase()}
+                            </Text>
+                          </View>
+                          {selectedAssessment?.id === item.id && (
+                            <View
+                              style={{
+                                backgroundColor: '#28a745',
+                                borderRadius: 10,
+                                paddingHorizontal: 8,
+                                paddingVertical: 4,
+                              }}>
+                              <Text style={{color: '#fff', fontSize: 12, fontWeight: '600'}}>
+                                SELECTED
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                      </TouchableOpacity>
+                    )}
+                    ListEmptyComponent={
+                      <View style={{padding: 20, alignItems: 'center'}}>
+                        <Text style={{fontSize: 16, color: '#666'}}>
+                          No assessments found
                         </Text>
                       </View>
                     }

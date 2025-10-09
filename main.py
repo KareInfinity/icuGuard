@@ -7,6 +7,8 @@ os.environ["CT2_FORCE_CPU"] = "1"
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from faster_whisper import WhisperModel
 import numpy as np
 import asyncio
@@ -34,7 +36,8 @@ import xml.etree.ElementTree as ET
 import ssl
 from requests.adapters import HTTPAdapter
 from urllib3.util.ssl_ import create_urllib3_context
-
+import html  # Add this
+import urllib.parse  # Add this
 # Disable SSL warnings for ICU Care Lite
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -152,6 +155,9 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+# Mount static files for audio access
+app.mount("/voices", StaticFiles(directory="audio"), name="voices")
 
 # Initialize faster-whisper model
 logger.info("Initializing faster-whisper model")
@@ -700,6 +706,64 @@ async def favicon():
     from fastapi.responses import Response
     return Response(content="", media_type="image/x-icon")
 
+@app.get("/audio/{file_path:path}")
+async def get_audio_file(file_path: str):
+    """Serve audio files with proper headers and error handling"""
+    try:
+        # Security check to prevent directory traversal
+        if ".." in file_path or file_path.startswith("/"):
+            logger.warning(f"Security violation: Invalid audio file path {file_path}")
+            raise HTTPException(status_code=400, detail="Invalid file path")
+        
+        # Construct full file path
+        audio_file_path = os.path.join("audio", file_path)
+        
+        # Check if file exists
+        if not os.path.exists(audio_file_path):
+            logger.warning(f"Audio file not found: {audio_file_path}")
+            raise HTTPException(status_code=404, detail="Audio file not found")
+        
+        # Check if it's actually a file (not a directory)
+        if not os.path.isfile(audio_file_path):
+            logger.warning(f"Path is not a file: {audio_file_path}")
+            raise HTTPException(status_code=404, detail="Not a file")
+        
+        # Get file info
+        file_stat = os.stat(audio_file_path)
+        file_size = file_stat.st_size
+        
+        # Determine content type based on file extension
+        file_extension = os.path.splitext(file_path)[1].lower()
+        content_type_map = {
+            '.wav': 'audio/wav',
+            '.mp3': 'audio/mpeg',
+            '.m4a': 'audio/mp4',
+            '.flac': 'audio/flac',
+            '.ogg': 'audio/ogg',
+            '.webm': 'audio/webm',
+            '.aac': 'audio/aac'
+        }
+        content_type = content_type_map.get(file_extension, 'audio/wav')
+        
+        logger.info(f"Serving audio file: {file_path} (size: {file_size} bytes, type: {content_type})")
+        
+        # Return file with proper headers
+        return FileResponse(
+            path=audio_file_path,
+            media_type=content_type,
+            headers={
+                "Content-Length": str(file_size),
+                "Accept-Ranges": "bytes",
+                "Cache-Control": "public, max-age=3600"  # Cache for 1 hour
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error serving audio file {file_path}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error serving audio file: {str(e)}")
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint for the server"""
@@ -966,7 +1030,8 @@ def transcribe_audio_bytes(audio_bytes, task_id: str = None):
                 min_speech_duration_ms=250,
                 max_speech_duration_s=3600,
                 min_silence_duration_ms=2000
-            )
+            ),
+            word_timestamps=True  # Enable word-level timing
         )
         
         # Update progress if this is a background task
@@ -975,8 +1040,11 @@ def transcribe_audio_bytes(audio_bytes, task_id: str = None):
                 if task_id in background_tasks:
                     background_tasks[task_id]["progress"] = 90
         
+        # Convert segments generator to list for multiple iterations
+        segments_list = list(segments)
+        
         # Combine all segments into a single text
-        transcription_text = " ".join([segment.text for segment in segments]).strip()
+        transcription_text = " ".join([segment.text for segment in segments_list]).strip()
         
         logger.info(f"Transcription completed at {datetime.now().strftime('%H:%M:%S')}")
         logger.info(f"Detected language: {info.language} with probability {info.language_probability}")
@@ -985,7 +1053,8 @@ def transcribe_audio_bytes(audio_bytes, task_id: str = None):
             "text": transcription_text,
             "language": info.language,
             "language_probability": info.language_probability,
-            "confidence": info.language_probability  # Using language probability as confidence
+            "confidence": info.language_probability,  # Using language probability as confidence
+            "segments": segments_list  # Include segments for word-level timing
         }
     except Exception as e:
         logger.error(f"Error in transcription: {str(e)}")
@@ -1031,6 +1100,106 @@ def save_transcription_to_file(original_filename: str, result: dict):
     except Exception as e:
         logger.error(f"Error saving transcription to file: {str(e)}")
         # Don't raise the error to avoid breaking the API response
+
+
+@app.get("/transcription/{form_type_id}/{nhino}")
+async def get_transcription_by_form_and_nhino(form_type_id: str, nhino: str):
+    """
+    Get the last created transcription JSON file by formTypeId and nhino
+    
+    Args:
+        form_type_id: The form type ID (e.g., 'sbar_001')
+        nhino: The patient's NHINO ID (e.g., '3251424')
+    
+    Returns:
+        The last created JSON file content for the given formTypeId and nhino
+    """
+    try:
+        transcriptions_dir = "transcriptions"
+        
+        if not os.path.exists(transcriptions_dir):
+            raise HTTPException(status_code=404, detail="Transcriptions directory not found")
+        
+        # Find all JSON files matching the pattern: {form_type_id}-{nhino}_{timestamp}.json
+        pattern = f"{form_type_id}-{nhino}_*.json"
+        matching_files = glob.glob(os.path.join(transcriptions_dir, pattern))
+        
+        if not matching_files:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No transcription files found for formTypeId: {form_type_id} and nhino: {nhino}"
+            )
+        
+        # Sort files by modification time to get the last created file
+        last_file = max(matching_files, key=os.path.getmtime)
+        
+        logger.info(f"Found {len(matching_files)} files for {form_type_id}-{nhino}, returning last created: {os.path.basename(last_file)}")
+        
+        # Read and return the JSON content
+        with open(last_file, 'r', encoding='utf-8') as f:
+            json_content = json.load(f)
+        
+        return {
+            "status": "success",
+            "formTypeId": form_type_id,
+            "nhino": nhino,
+            "filename": os.path.basename(last_file),
+            "filepath": last_file,
+            "created_at": datetime.fromtimestamp(os.path.getmtime(last_file)).isoformat(),
+            "data": json_content
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting transcription: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.get("/transcription/latest/{form_type_id}/{nhino}")
+async def get_latest_transcription_json(form_type_id: str, nhino: str):
+    """
+    Get the latest transcription JSON file content directly by formTypeId and nhino
+    
+    Args:
+        form_type_id: The form type ID (e.g., 'sbar_001')
+        nhino: The patient's NHINO ID (e.g., '3251424')
+    
+    Returns:
+        The JSON content of the last created file
+    """
+    try:
+        transcriptions_dir = "transcriptions"
+        
+        if not os.path.exists(transcriptions_dir):
+            raise HTTPException(status_code=404, detail="Transcriptions directory not found")
+        
+        # Find all JSON files matching the pattern: {form_type_id}-{nhino}_{timestamp}.json
+        pattern = f"{form_type_id}-{nhino}_*.json"
+        matching_files = glob.glob(os.path.join(transcriptions_dir, pattern))
+        
+        if not matching_files:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No transcription files found for formTypeId: {form_type_id} and nhino: {nhino}"
+            )
+        
+        # Sort files by modification time to get the last created file
+        last_file = max(matching_files, key=os.path.getmtime)
+        
+        logger.info(f"Returning latest transcription: {os.path.basename(last_file)}")
+        
+        # Read and return the JSON content directly
+        with open(last_file, 'r', encoding='utf-8') as f:
+            json_content = json.load(f)
+        
+        return json_content
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting latest transcription: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @app.get("/process_session/{session_id}")
@@ -1302,6 +1471,62 @@ async def get_transcription_file_content(filename: str):
         logger.error(f"Error reading transcription file {filename}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/transcription/{formTypeId}/{nhino}")
+async def get_transcription_by_formtype_patient(formTypeId: str, nhino: str):
+    """Get transcription JSON file by formTypeId and nhino"""
+    try:
+        transcriptions_dir = "transcriptions"
+        logger.info(f"Looking for transcription: formTypeId={formTypeId}, nhino={nhino}")
+        
+        if not os.path.exists(transcriptions_dir):
+            logger.error(f"Transcriptions directory not found: {transcriptions_dir}")
+            raise HTTPException(status_code=404, detail="Transcriptions directory not found")
+        
+        # Search for files matching the pattern: {formTypeId}-{nhino}.json (exact match)
+        exact_filename = f"{formTypeId}-{nhino}.json"
+        exact_filepath = os.path.join(transcriptions_dir, exact_filename)
+        
+        # Check for exact match first (new format without timestamp)
+        if os.path.exists(exact_filepath):
+            matching_files = [exact_filepath]
+        else:
+            # Fallback to old format with timestamp for backward compatibility
+            pattern = f"{formTypeId}-{nhino}_*.json"
+            matching_files = glob.glob(os.path.join(transcriptions_dir, pattern))
+        
+        if not matching_files:
+            logger.warning(f"No transcription found for formTypeId={formTypeId}, nhino={nhino}")
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No transcription found for formTypeId={formTypeId}, nhino={nhino}"
+            )
+        
+        # Sort by modification time (newest first) and get the most recent
+        matching_files.sort(key=os.path.getmtime, reverse=True)
+        latest_file = matching_files[0]
+        filename = os.path.basename(latest_file)
+        
+        logger.info(f"Found transcription file: {filename}")
+        
+        # Read the JSON file
+        with open(latest_file, 'r', encoding='utf-8') as f:
+            json_content = f.read()
+            transcription_data = json.loads(json_content)
+        
+        stat = os.stat(latest_file)
+        
+        logger.info(f"Successfully retrieved transcription: {filename} (size: {stat.st_size} bytes)")
+        
+        return transcription_data
+          
+        
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving transcription for formTypeId={formTypeId}, nhino={nhino}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving transcription: {str(e)}")
+
 @app.delete("/delete-transcription/{filename}")
 async def delete_transcription(filename: str):
     """Delete a specific transcription file"""
@@ -1526,11 +1751,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     "patient": message.get("patient"),
                     "ward": message.get("ward"), 
                     "user": message.get("user"),
+                    "assessment": message.get("assessment"),
                     "username": message.get("username", username)
                 }
                 
                 logger.info(f"[SESSION {session_id}] AUDIO CHUNK {chunk_counter} RECEIVED - Size: {audio_size} bytes, Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                logger.info(f"[SESSION {session_id}] ICU DATA - Patient: {icu_data['patient']['name'] if icu_data['patient'] else 'None'}, Ward: {icu_data['ward']['desc'] if icu_data['ward'] else 'None'}, User: {icu_data['user']['loginname'] if icu_data['user'] else 'None'}")
+                logger.info(f"[SESSION {session_id}] ICU DATA - Patient: {icu_data['patient']['name'] if icu_data['patient'] else 'None'}, Ward: {icu_data['ward']['desc'] if icu_data['ward'] else 'None'}, User: {icu_data['user']['loginname'] if icu_data['user'] else 'None'}, Assessment: {icu_data['assessment']['title'] if icu_data['assessment'] else 'None'}")
 
                 # Save audio chunk to file immediately with safe path handling
                 chunk_filename = f"chunk_{chunk_counter}_{timestamp}.wav"
@@ -1879,10 +2105,12 @@ class AudioProcessor:
                     "confidence": result.get("confidence", 0.0),
                     "language": result.get("language", "en"),
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "segments": result.get("segments", []),  # Include segments for word-level timing
                     "icu_context": {
                         "patient": icu_data.get('patient'),
                         "ward": icu_data.get('ward'),
                         "user": icu_data.get('user'),
+                        "assessment": icu_data.get('assessment'),
                         "username": icu_data.get('username', username)
                     }
                 }
@@ -1937,12 +2165,36 @@ class AudioProcessor:
             output_dir = "audio_files"
             os.makedirs(output_dir, exist_ok=True)
             
-            # Save JSON output for individual chunk
+            # Save JSON output for individual chunk (with segments serialized properly)
             json_filename = f"chunk_{chunk_number}_{session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]}.json"
             json_filepath = os.path.join(output_dir, json_filename)
             
+            # Prepare data for JSON serialization (convert segments to serializable format)
+            json_data = output_data.copy()
+            if 'segments' in json_data and json_data['segments']:
+                # Convert segments to serializable format
+                serializable_segments = []
+                for segment in json_data['segments']:
+                    segment_dict = {
+                        'start': segment.start,
+                        'end': segment.end,
+                        'text': segment.text,
+                        'words': []
+                    }
+                    if hasattr(segment, 'words') and segment.words:
+                        for word in segment.words:
+                            word_dict = {
+                                'word': word.word,
+                                'start': word.start,
+                                'end': word.end,
+                                'probability': getattr(word, 'probability', 0.99)
+                            }
+                            segment_dict['words'].append(word_dict)
+                    serializable_segments.append(segment_dict)
+                json_data['segments'] = serializable_segments
+            
             with open(json_filepath, 'w', encoding='utf-8') as json_file:
-                json.dump(output_data, json_file, indent=2, ensure_ascii=False)
+                json.dump(json_data, json_file, indent=2, ensure_ascii=False)
                 json_file.flush()             # Force flush buffers
                 os.fsync(json_file.fileno())  # Force flush to disk at OS level
             # File is now fully flushed and closed
@@ -2005,10 +2257,330 @@ class AudioProcessor:
                 os.fsync(session_file.fileno())  # Force flush to disk at OS level
             # File is now fully flushed and closed
             
+            # Create structured JSON transcription (like mockTranscription.json) - ALWAYS CREATE
+            logger.info(f"[FORCE] Creating structured JSON transcription for session {session_id}")
+            self._create_structured_transcription(session_id, chunk_number, output_data, username, session_count, transcriptions_dir)
+            
             logger.info(f"[BACKGROUND] Output saved - JSON: {json_filename}, Transcription appended to: {session_txt_filename}")
             
         except Exception as e:
             logger.error(f"[BACKGROUND] Error saving output: {str(e)}")
+    
+    def _create_structured_transcription(self, session_id, chunk_number, output_data, username, session_count, transcriptions_dir):
+        """Create structured transcription JSON like mockTranscription.json"""
+        try:
+            logger.info(f"[DEBUG] Starting _create_structured_transcription for session {session_id}, chunk {chunk_number}")
+            
+            # Extract ICU context
+            icu_context = output_data.get('icu_context', {})
+            patient_info = icu_context.get('patient', {})
+            ward_info = icu_context.get('ward', {})
+            user_info = icu_context.get('user', {})
+            assessment_info = icu_context.get('assessment', {})
+            
+            logger.info(f"[DEBUG] ICU context: {icu_context}")
+            logger.info(f"[DEBUG] Patient info: {patient_info}")
+            logger.info(f"[DEBUG] Assessment info: {assessment_info}")
+            
+            # Get real audio duration from the audio file
+            audio_filepath = output_data.get('filename', '')
+            audio_duration = self._get_audio_duration(audio_filepath)
+            
+            # Create word objects from Whisper segments (if available)
+            transcription_text = output_data.get('text', '')
+            segments = output_data.get('segments', [])
+            
+            if segments and len(segments) > 0:
+                # Check if segments are already serialized (from JSON) or still Whisper objects
+                if isinstance(segments[0], dict):
+                    # Segments are already serialized from JSON, use them directly
+                    words = self._create_word_objects_from_serialized_segments(segments, 0.0, audio_duration)
+                else:
+                    # Segments are still Whisper objects, use them directly
+                    words = self._create_word_objects(segments, 0.0, audio_duration)
+            else:
+                # Fallback to text-based word creation
+                words = self._create_word_objects_from_text(transcription_text, 0.0, audio_duration)
+            
+            # Get the actual audio file path for the audioUrl
+            audio_filepath = output_data.get('filename', '')
+            baseurl = "http://192.168.1.21:8111/voices"
+            
+            if audio_filepath and os.path.exists(audio_filepath):
+                # Convert absolute path to relative path from audio directory
+                audio_dir = os.path.abspath("audio")
+                if audio_filepath.startswith(audio_dir):
+                    relative_path = os.path.relpath(audio_filepath, audio_dir)
+                    # Convert Windows path separators to forward slashes for URL
+                    relative_path = relative_path.replace("\\", "/")
+                    audio_url = f"{baseurl}/{relative_path}"
+                else:
+                    # Fallback to generic path if file is not in audio directory
+                    audio_url = f"{baseurl}/{username}/session_{session_id}/chunk_{chunk_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+            else:
+                # Fallback if no file path available
+                audio_url = f"{baseurl}/{username}/session_{session_id}/chunk_{chunk_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+            
+            # Create structured transcription with fallback values
+            structured_transcription = {
+                "id": f"trans-{session_id}-{chunk_number}",
+                "audioUrl": audio_url,
+                "duration": audio_duration,
+                "createdAt": datetime.now().isoformat() + "Z",
+                "patientId": patient_info.get('patientid', '2929') if patient_info else '2929',
+                "patientName": patient_info.get('name', 'Intan New 2').replace('%20', ' ') if patient_info else 'Intan New 2',
+                "clinicianId": user_info.get('userid', 'unknown') if user_info else 'unknown',
+                "clinicianName": f"Dr. {user_info.get('loginname', 'Unknown')}" if user_info else "Dr. Unknown",
+                "formType": f"{assessment_info.get('title', 'SBAR Assessment - 1')} Assessment" if assessment_info else "SBAR Assessment - 1 Assessment",
+                "formTypeId": assessment_info.get('id', 'sbar_001') if assessment_info else 'sbar_001',
+                "metadata": {
+                    "audioCodec": "opus",
+                    "sampleRate": 48000,
+                    "language": output_data.get('language', 'en-US'),
+                    "modelVersion": "aicare-v2t-model-v2.3"
+                },
+                "corrections": [],
+                "sentences": [
+                    {
+                        "id": f"sent-{chunk_number:03d}",
+                        "startTime": 0.0,
+                        "endTime": audio_duration,
+                        "words": words
+                    }
+                ]
+            }
+            
+            # Create structured JSON filename using formTypeId-patientId format with timestamp (always new file)
+            # Use fallback values to ensure file is always created
+            form_type_id = assessment_info.get('id', 'sbar_001') if assessment_info else 'sbar_001'
+            patient_id = patient_info.get('nhino', '3251424') if patient_info else '3251424'
+            
+            # If no ICU context, use values from your current session
+            if not assessment_info:
+                form_type_id = 'sbar_001'
+            if not patient_info:
+                patient_id = '3251424'
+            
+            logger.info(f"[DEBUG] Form type ID: {form_type_id}")
+            logger.info(f"[DEBUG] Patient ID (nhino): {patient_id}")
+            
+            # Always create new file with timestamp - no overwriting
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            structured_filename = f"{form_type_id}-{patient_id}_{timestamp}.json"
+            structured_filepath = os.path.join(transcriptions_dir, structured_filename)
+            
+            logger.info(f"[DEBUG] Structured filename: {structured_filename}")
+            logger.info(f"[DEBUG] Structured filepath: {structured_filepath}")
+            
+            # Always create new file - no checking for existing files
+            logger.info(f"[NEW FILE] Creating new transcription file: {structured_filename}")
+                
+            # Write structured transcription
+            logger.info(f"[DEBUG] Writing structured transcription to: {structured_filepath}")
+            with open(structured_filepath, 'w', encoding='utf-8') as f:
+                json.dump(structured_transcription, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            
+            logger.info(f"[BACKGROUND] Structured transcription created: {structured_filename}")
+            logger.info(f"[DEBUG] File successfully written to: {structured_filepath}")
+            
+            # Verify file was created
+            if os.path.exists(structured_filepath):
+                logger.info(f"[SUCCESS] JSON file confirmed created: {structured_filepath}")
+            else:
+                logger.error(f"[ERROR] JSON file was not created: {structured_filepath}")
+            
+        except Exception as e:
+            logger.error(f"[BACKGROUND] Error creating structured transcription: {str(e)}")
+            import traceback
+            logger.error(f"[BACKGROUND] Traceback: {traceback.format_exc()}")
+    
+    def _create_word_objects(self, segments, start_time=0.0, duration=5.0):
+        """Create word objects with exact timing from Whisper segments"""
+        word_objects = []
+        word_counter = 1
+        
+        # Convert segments generator to list if needed
+        if hasattr(segments, '__iter__') and not isinstance(segments, list):
+            segments_list = list(segments)
+        else:
+            segments_list = segments
+        
+        for segment in segments_list:
+            segment_text = segment.text.strip()
+            if segment_text:
+                # Check if Whisper provided word-level timing
+                if hasattr(segment, 'words') and segment.words:
+                    # Use Whisper's exact word timing (most accurate)
+                    for word in segment.words:
+                        word_obj = {
+                            "id": f"w{word_counter:03d}",
+                            "text": word.word.strip(),
+                            "startTime": round(word.start, 1),
+                            "endTime": round(word.end, 1),
+                            "confidence": getattr(word, 'probability', 0.99)
+                        }
+                        
+                        # Add alternative texts for medical terms
+                        word_text = word_obj["text"].lower()
+                        if word_text in ['level', 'hr', 'bp', 'sp02', 'spo2', 'vbg', 'abg', 'er', 'rta', 'fast', 'scan', 'sij']:
+                            word_obj["alternativeTexts"] = self._get_medical_alternatives(word_obj["text"])
+                        
+                        word_objects.append(word_obj)
+                        word_counter += 1
+                else:
+                    # Fallback to even distribution if no word timing
+                    words = segment_text.split()
+                    segment_duration = segment.end - segment.start
+                    time_per_word = segment_duration / len(words) if words else 0
+                    
+                    for i, word in enumerate(words):
+                        word_start = segment.start + (i * time_per_word)
+                        word_end = word_start + time_per_word
+                        
+                        word_obj = {
+                            "id": f"w{word_counter:03d}",
+                            "text": word,
+                            "startTime": round(word_start, 1),
+                            "endTime": round(word_end, 1),
+                            "confidence": 0.99
+                        }
+                        
+                        # Add alternative texts for medical terms
+                        word_text = word_obj["text"].lower()
+                        if word_text in ['level', 'hr', 'bp', 'sp02', 'spo2', 'vbg', 'abg', 'er', 'rta', 'fast', 'scan', 'sij']:
+                            word_obj["alternativeTexts"] = self._get_medical_alternatives(word_obj["text"])
+                        
+                        word_objects.append(word_obj)
+                        word_counter += 1
+        
+        return word_objects
+    
+    def _create_word_objects_from_text(self, text, start_time=0.0, duration=5.0):
+        """Create word objects with even distribution timing from text (fallback method)"""
+        words = text.split()
+        word_objects = []
+        
+        if not words:
+            return word_objects
+        
+        # Calculate timing per word
+        time_per_word = duration / len(words) if words else 0
+        
+        for i, word in enumerate(words):
+            word_start = start_time + (i * time_per_word)
+            word_end = word_start + time_per_word
+            
+            # Clean word text (remove punctuation for better confidence)
+            clean_word = re.sub(r'[^\w]', '', word)
+            confidence = 0.99 if clean_word else 0.85
+            
+            word_obj = {
+                "id": f"w{i+1:03d}",
+                "text": word,
+                "startTime": round(word_start, 1),
+                "endTime": round(word_end, 1),
+                "confidence": confidence
+            }
+            
+            # Add alternative texts for medical terms if needed
+            if word.lower() in ['level', 'hr', 'bp', 'sp02', 'spo2', 'vbg', 'abg', 'er', 'rta', 'fast', 'scan', 'sij']:
+                word_obj["alternativeTexts"] = self._get_medical_alternatives(word)
+            
+            word_objects.append(word_obj)
+        
+        return word_objects
+    
+    def _create_word_objects_from_serialized_segments(self, segments, start_time=0.0, duration=5.0):
+        """Create word objects from serialized segments (from JSON)"""
+        word_objects = []
+        word_counter = 1
+        
+        for segment in segments:
+            segment_text = segment.get('text', '').strip()
+            if segment_text:
+                # Check if segment has word-level timing
+                words_data = segment.get('words', [])
+                if words_data:
+                    # Use serialized word timing (most accurate)
+                    for word_data in words_data:
+                        word_obj = {
+                            "id": f"w{word_counter:03d}",
+                            "text": word_data.get('word', '').strip(),
+                            "startTime": round(word_data.get('start', 0.0), 1),
+                            "endTime": round(word_data.get('end', 0.0), 1),
+                            "confidence": word_data.get('probability', 0.99)
+                        }
+                        
+                        # Add alternative texts for medical terms
+                        word_text = word_obj["text"].lower()
+                        if word_text in ['level', 'hr', 'bp', 'sp02', 'spo2', 'vbg', 'abg', 'er', 'rta', 'fast', 'scan', 'sij']:
+                            word_obj["alternativeTexts"] = self._get_medical_alternatives(word_obj["text"])
+                        
+                        word_objects.append(word_obj)
+                        word_counter += 1
+                else:
+                    # Fallback to even distribution if no word timing
+                    words = segment_text.split()
+                    segment_duration = segment.get('end', 0.0) - segment.get('start', 0.0)
+                    time_per_word = segment_duration / len(words) if words else 0
+                    
+                    for i, word in enumerate(words):
+                        word_start = segment.get('start', 0.0) + (i * time_per_word)
+                        word_end = word_start + time_per_word
+                        
+                        word_obj = {
+                            "id": f"w{word_counter:03d}",
+                            "text": word,
+                            "startTime": round(word_start, 1),
+                            "endTime": round(word_end, 1),
+                            "confidence": 0.99
+                        }
+                        
+                        # Add alternative texts for medical terms
+                        word_text = word_obj["text"].lower()
+                        if word_text in ['level', 'hr', 'bp', 'sp02', 'spo2', 'vbg', 'abg', 'er', 'rta', 'fast', 'scan', 'sij']:
+                            word_obj["alternativeTexts"] = self._get_medical_alternatives(word_obj["text"])
+                        
+                        word_objects.append(word_obj)
+                        word_counter += 1
+        
+        return word_objects
+    
+    def _get_medical_alternatives(self, word):
+        """Get alternative texts for medical terms"""
+        alternatives = {
+            'level': ['Level', 'LEVEL'],
+            'hr': ['heart rate', 'HR', 'Heart Rate'],
+            'bp': ['blood pressure', 'BP', 'Blood Pressure'],
+            'sp02': ['SpO2', 'oxygen saturation', 'O2 sat'],
+            'spo2': ['SpO2', 'oxygen saturation', 'O2 sat'],
+            'vbg': ['VBG', 'ABG'],
+            'abg': ['ABG', 'VBG'],
+            'er': ['ER', 'Emergency Room'],
+            'rta': ['RTA', 'Road Traffic Accident'],
+            'fast': ['FAST', 'Focused Assessment'],
+            'scan': ['SCAN', 'scan'],
+            'sij': ['SI joint', 'sacroiliac joint']
+        }
+        return alternatives.get(word.lower(), [])
+    
+    def _get_audio_duration(self, audio_filepath):
+        """Get the duration of an audio file in seconds"""
+        try:
+            if not audio_filepath or not os.path.exists(audio_filepath):
+                logger.warning(f"[BACKGROUND] Audio file not found: {audio_filepath}, using default duration")
+                return 5.0  # Default fallback
+            
+            # Use librosa to get audio duration
+            duration = librosa.get_duration(path=audio_filepath)
+            logger.info(f"[BACKGROUND] Audio duration: {duration:.2f} seconds for {os.path.basename(audio_filepath)}")
+            return duration
+            
+        except Exception as e:
+            logger.error(f"[BACKGROUND] Error getting audio duration: {str(e)}, using default duration")
+            return 5.0  # Default fallback
     
     def _send_websocket_message_immediate(self, session_id: str, chunk_number: int, transcription_text: str, result, icu_data: dict = None):
         """Send transcription result to websocket immediately with ICU context"""
@@ -2406,7 +2978,8 @@ class ICUCareLiteClient:
                     "code": ward.findtext("code", ""),
                     "capacity": ward.findtext("capacity", "")
                 }
-                data["wards"].append(ward_data)
+                if(ward_data["unitid"] != ""):
+                    data["wards"].append(ward_data)
                 if i < 3:  # Log first 3 wards for debugging
                     logger.info(f"ICU Care Lite - Ward {i+1}: {ward_data}")
             
@@ -2417,9 +2990,9 @@ class ICUCareLiteClient:
                     "userid": user.findtext("userid", ""),
                     "loginname": user.findtext("loginname", ""),
                     "groupname": user.findtext("groupname", ""),
-                    "rights": user.findtext("rights", ""),
-                    "status": user.findtext("status", ""),
-                    "wards": user.findtext("wards", "")
+                    # "rights": user.findtext("rights", ""),
+                    # "status": user.findtext("status", ""),
+                    # "wards": user.findtext("wards", "")
                 }
                 data["users"].append(user_data)
                 if i < 3:  # Log first 3 users for debugging
@@ -2428,10 +3001,13 @@ class ICUCareLiteClient:
             # Extract patients
             logger.info("ICU Care Lite - Processing patients data")
             for i, patient in enumerate(patients):
+                patient_name = patient.findtext("name", "")
+                # Decode URL encoding first, then XML entities
+                decoded_name = html.unescape(urllib.parse.unquote(patient_name))
                 patient_data = {
                     "patientid": patient.findtext("patientid", ""),
                     "eventid": patient.findtext("eventid", ""),
-                    "name": patient.findtext("name", ""),
+                    "name": decoded_name,
                     "bed": patient.findtext("bed", ""),
                     "bedid": patient.findtext("bedid", ""),
                     "room": patient.findtext("room", ""),
@@ -2450,7 +3026,8 @@ class ICUCareLiteClient:
                     "ic": patient.findtext("ic", ""),
                     "drname": patient.findtext("drname", "")
                 }
-                data["patients"].append(patient_data)
+                if(patient_data["nhino"] != ""):
+                    data["patients"].append(patient_data)
                 if i < 3:  # Log first 3 patients for debugging
                     logger.info(f"ICU Care Lite - Patient {i+1}: {patient_data}")
             
